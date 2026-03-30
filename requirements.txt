@@ -1,0 +1,22 @@
+transformers>=4.45.0,<5.0.0
+imageio
+imageio[ffmpeg]
+safetensors
+einops
+sentencepiece
+protobuf
+modelscope
+ftfy
+# pynvml
+pandas
+accelerate>=1.0.0
+peft
+datasets
+# deepspeed>=0.15.4
+controlnet-aux
+mediapipe==0.10.14
+wandb
+python-dotenv
+openai
+hf_transfer
+httpx[socks]
