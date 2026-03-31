@@ -1,6 +1,7 @@
 __pycache__/
 .vscode/
 .cursor/
+.DS_Store
 
 diffsynth.egg-info
 temp/
