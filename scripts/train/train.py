@@ -9,6 +9,7 @@ import torch, os
 from src.physical_constant.wan_video_new import WanVideoPipeline, ModelConfig
 from src.physical_constant.utils import DiffusionTrainingModule, launch_training_task, wan_parser
 from src.physical_constant.unified_dataset import ControlSignalDataset_Falling
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"

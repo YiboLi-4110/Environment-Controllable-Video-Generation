@@ -1,3 +1,9 @@
+# --- 离线配置与缓存配置 ---
+export WANDB_API_KEY="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" # 填入你的 Key
+export WANDB_MODE="offline"               # 核心：设置为离线模式，确保训练时不断网崩溃
+export WANDB_PROJECT="gravity1"    # 设置项目名称
+export HF_HUB_OFFLINE=1
+
 # for 81 frames
 #   max = 6  when using accelerate_config_4_gpu_zero_stage_2.yaml
 #   max = 10 when using accelerate_config_4_gpu_zero_stage_2_offload_optimizer.yaml
