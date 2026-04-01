@@ -9,6 +9,8 @@ wandb/
 conda-env/
 docs/
 datasets/train/
+output/
+checkpoints/
 
 .cursorignore
 *.log
