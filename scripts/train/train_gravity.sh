@@ -16,6 +16,9 @@ CONTROL_SIGNAL_TYPE="gravity"
 DATASET_BASE_PATH_FALLING="datasets/train/falling_4k"
 DATASET_METADATA_PATH_FALLING="datasets/train/falling_4k.csv"
 
+# 本地 wandb 元数据目录名；并行多卡/多任务时改为不同名称（如 wandb1、wandb2）避免冲突
+WANDB_DIR="wandb"
+
 accelerate launch \
   --config_file scripts/accelerate/accelerate_config_4_gpu_multi_gpu.yaml \
   scripts/train/train.py \
@@ -41,4 +44,5 @@ accelerate launch \
   --gradient_accumulation_steps 2 \
   --dataset_num_workers 2 \
   --offline_load \
-  --wandb_logging
+  --wandb_logging \
+  --wandb_dir ${WANDB_DIR}

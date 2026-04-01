@@ -779,7 +779,12 @@ def launch_training_task(
     if accelerator.is_main_process:
         datetime_str = get_datetime_str()
         run_name = args.wandb_run_name if args.wandb_run_name else datetime_str
-        wandb.init(project=args.wandb_project, name=run_name, config=args)
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            config=args,
+            dir=args.wandb_dir,
+        )
 
         if args.controlnet_checkpoint is None:
             args.output_path = os.path.join(args.output_path, datetime_str)
@@ -904,6 +909,7 @@ def wan_parser():
     parser.add_argument("--wandb_logging", default=False, action="store_true", help="Whether to enable wandb logging.")
     parser.add_argument("--wandb_project", type=str, default="diffsynth-training", help="Wandb project name.")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name.")
+    parser.add_argument("--wandb_dir", type=str, default="wandb", help="Directory under cwd where wandb stores run metadata (offline logs, etc.). Use distinct names (e.g. wandb1, wandb2) when running multiple trainings in parallel.")
 
     parser.add_argument("--max_grad_norm", type=float, default=-1, help="Max gradient norm for clipping.")
 
