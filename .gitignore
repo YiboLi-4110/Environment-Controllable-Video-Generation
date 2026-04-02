@@ -9,9 +9,10 @@ wandb/
 wandb*/
 conda-env/
 docs/
-datasets/train/
-output/
+datasets/gravity/train/
+outputs/
 checkpoints/
+models/
 
 .cursorignore
 *.log

@@ -423,6 +423,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         num_frames=81,
         height=480,
         width=832,
+        is_validation_dataset=False,
     ):
         self.base_path = base_path
         self.metadata_path = metadata_path
@@ -430,6 +431,14 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         self.num_frames = num_frames
         self.height = height
         self.width = width
+        self.is_validation_dataset = is_validation_dataset
+
+        if self.is_validation_dataset:
+            self.media_type = "image"
+            self.blob_ext = "*.jpg"
+        else:
+            self.media_type = "video"
+            self.blob_ext = "*.mp4"
 
         self.to_tensor_transform = transforms.ToTensor()
         self.to_pil_transform = transforms.ToPILImage()
@@ -439,19 +448,34 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         self.load_metadata()
 
     def load_metadata(self):
-        file_paths = glob.glob(os.path.join(self.base_path, "*.mp4"))
-        file_names = set(os.path.basename(x) for x in file_paths)
-        self.df = pandas.read_csv(self.metadata_path)
+        if not self.is_validation_dataset:
+            file_paths = glob.glob(os.path.join(self.base_path, self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
 
-        self.df['checked'] = self.df['video'].map(lambda x, files=file_names: int(x in files))
-        self.df = self.df[self.df['checked'] == 1]
-        self.df.reset_index(drop=True, inplace=True)
+            self.df['checked'] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df['checked'] == 1]
+            self.df.reset_index(drop=True, inplace=True)
 
-        print(f"[ControlSignalDataset_Falling] Loaded {len(self.df)} samples from {self.metadata_path}")
-        print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+            print(f"[ControlSignalDataset_Falling] Loaded {len(self.df)} training samples from {self.metadata_path}")
+            print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+        else:
+            file_paths = glob.glob(os.path.join(self.base_path, "images", self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
+
+            self.df['checked'] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df['checked'] == 1]
+            self.df.reset_index(drop=True, inplace=True)
+
+            print(f"[ControlSignalDataset_Falling] Loaded {len(self.df)} validation samples from {self.metadata_path}")
+            if len(self.df) > 0:
+                print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
 
     def _normalize_gravity(self, g):
-        return (g - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        temp_gravity = (g - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        norm_gravity = 2*temp_gravity - 1.  # -> [-1, 1]
+        return norm_gravity
 
     def _generate_control_video(self, gravity, num_frames, num_channels=3, height=480, width=832):
         controlnet_signal = torch.zeros((num_frames, num_channels, height, width))
@@ -466,21 +490,30 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
     def get_batch(self, idx):
         item = self.df.iloc[idx]
         caption = str(item['caption'])
-        file_name = str(item['video'])
+        file_name = str(item[self.media_type])
         gravity = float(item['gravity'])
 
-        file_path = os.path.join(self.base_path, file_name)
-        pixel_values = load_video_to_pil(file_path)
+        if self.is_validation_dataset:
+            file_path = os.path.join(self.base_path, "images", file_name)
+            image = Image.open(file_path).convert("RGB")
+            desired_size = (self.width, self.height)
+            if image.size != desired_size:
+                image = image.resize(desired_size, resample=Image.Resampling.LANCZOS)
+            pixel_values = self.to_tensor_transform(image)   # (3, H, W) in [0, 1]
+            pixel_values = 2 * pixel_values - 1              # -> [-1, 1]
+            file_id = file_name.rsplit(".", 1)[0]
+        else:
+            file_path = os.path.join(self.base_path, file_name)
+            pixel_values = load_video_to_pil(file_path)
 
-        if len(pixel_values) > self.num_frames:
-            indices = np.linspace(0, len(pixel_values) - 1, self.num_frames, dtype=int)
-            pixel_values = [pixel_values[i] for i in indices]
-        pixel_values = pixel_values[:self.num_frames]
+            if len(pixel_values) > self.num_frames:
+                indices = np.linspace(0, len(pixel_values) - 1, self.num_frames, dtype=int)
+                pixel_values = [pixel_values[i] for i in indices]
+            pixel_values = pixel_values[:self.num_frames]
 
-        pixel_values = torch.stack([self.to_tensor_transform(img) for img in pixel_values])  # (F, 3, H, W) in [0, 1]
-        pixel_values = 2 * pixel_values - 1  # -> [-1, 1]
-
-        file_id = file_name.rsplit(".mp4", 1)[0]
+            pixel_values = torch.stack([self.to_tensor_transform(img) for img in pixel_values])  # (F, 3, H, W) in [0, 1]
+            pixel_values = 2 * pixel_values - 1  # -> [-1, 1]
+            file_id = file_name.rsplit(".mp4", 1)[0]
 
         return pixel_values, caption, gravity, file_id
 
@@ -496,7 +529,10 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         )
 
         pixel_values = (pixel_values + 1) / 2  # -> [0, 1]
-        pil_image_list = [self.to_pil_transform(tensor) for tensor in pixel_values]
+        if not self.is_validation_dataset:
+            pil_image_list = [self.to_pil_transform(tensor) for tensor in pixel_values]
+        else:
+            pil_image_list = [self.to_pil_transform(pixel_values)]
 
         return {
             "video": pil_image_list,

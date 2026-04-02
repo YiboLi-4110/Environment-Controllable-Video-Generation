@@ -660,8 +660,7 @@ class ModelLogger:
 def data_is_correct_shape_and_type(data, control_signal_type, num_frames):
 
     implemented_controlnet_types = [
-        "canny_edge", 
-        "direct_force_and_goal_force_and_mass",
+        "gravity", 
     ]
     if control_signal_type in implemented_controlnet_types:
 

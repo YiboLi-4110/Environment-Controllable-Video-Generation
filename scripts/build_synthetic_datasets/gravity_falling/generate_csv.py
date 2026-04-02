@@ -33,7 +33,7 @@ def extract_info(filename):
             background_name = '_'.join(parts[i + 2:])
             break
     
-    return name_without_ext, gravity, background_name
+    return gravity, background_name
 
 
 def get_random_caption(background_data):
@@ -70,7 +70,9 @@ def main():
         for filename in tqdm(os.listdir(video_dir)):
             if filename.endswith('.mp4'):
                 # 提取信息
-                video_name, gravity, background_name = extract_info(filename)
+                gravity, background_name = extract_info(filename)
+                # 保留原始文件名（包含.mp4后缀）
+                video_name = filename
                 
                 # 获取caption
                 caption = ""
