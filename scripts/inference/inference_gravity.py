@@ -174,7 +174,7 @@ def main(args):
             input_image = input_image[0].convert("RGB")
 
             control_vis = ((control_signal_video.to(float).numpy() + 1.0) / 2.0 * 255).astype(np.uint8)
-            save_video(control_vis, fname_control_video, fps=15, quality=5)
+            save_video(control_vis, fname_control_video, fps=16, quality=5)
 
             with open(fname_text, 'w') as f:
                 json.dump({"text_prompt": prompt, "gravity": gravity}, f, indent=4)
@@ -190,7 +190,7 @@ def main(args):
                     controlnet=args.controlnet,
                     control_signal_video=control_signal_video.to(device),
                 )
-                save_video(video, fname_output_video, fps=15, quality=5)
+                save_video(video, fname_output_video, fps=16, quality=5)
 
                 video_array = np.asarray(
                     torch.stack([dataset.to_tensor_transform(image) for image in video]))
@@ -202,7 +202,7 @@ def main(args):
                     dataset.to_pil_transform(torch.from_numpy(frame).permute(2, 0, 1))
                     for frame in video_with_prompt
                 ]
-                save_video(video_with_prompt, fname_output_video_with_prompt, fps=15, quality=5)
+                save_video(video_with_prompt, fname_output_video_with_prompt, fps=16, quality=5)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-将 gravity_falling 渲染目录下的 JPEG 序列合成为 MP4（与 falling_render.py 输出一致）。
-目录布局须与 falling_render.py / falling_render.sh 一致：
-  <RENDER_DIR_ROOT>/sample_<id>/frame0001.jpg ... params.json
-视频输出到与帧目录同级的 videos/ 目录（见 create_mp4_from_frames 中的路径推导）。
+将 gravity_sliding 渲染目录下的 JPEG 序列合成为 MP4（与 sliding_render.py 输出一致）。
+目录布局须与 sliding_render.py / sliding_render.sh 一致：
+  <RENDER_DIR_ROOT>/sample_<id>_g_<gravity>_<hdri>/frame1.jpg ... params.json
+视频输出到与帧目录同级的 videos/ 目录。
 """
 import os
 import json
@@ -15,7 +15,7 @@ import math
 
 def glob_sample_dir(base_dir, sample_id):
     """
-    与 falling_render 输出目录一致：sample_<id>_g_<gravity>.2f
+    与 sliding_render 输出目录一致：sample_<id>_g_<gravity>.2f_<hdri>
     返回匹配到的单个目录路径，若无或多个则返回 None / 取字典序第一个并打印警告。
     """
     pattern = os.path.join(base_dir, f"sample_{int(sample_id)}_g_*")
@@ -58,9 +58,7 @@ def create_mp4_from_frames(frames_dir):
         )
         return False
 
-    output_filename = (
-        f"sample_{sample_id}_g_{gravity_z:.2f}_{hdri_file_name}.mp4"
-    )
+    output_filename = f"sample_{sample_id}_g_{gravity_z:.2f}_{hdri_file_name}.mp4"
     output_dir = os.path.join(
         os.path.dirname(os.path.dirname(frames_dir)), "videos"
     )
@@ -69,8 +67,7 @@ def create_mp4_from_frames(frames_dir):
 
     jpg_glob = os.path.join(frames_dir, "frame*.jpg")
     jpeg_glob = os.path.join(frames_dir, "frame*.jpeg")
-    jpg_files = sorted(glob.glob(jpg_glob) + glob.glob(jpeg_glob))
-    jpg_files = sorted(set(jpg_files))
+    jpg_files = sorted(set(glob.glob(jpg_glob) + glob.glob(jpeg_glob)))
     if not jpg_files:
         print(f"No JPEG frames in {frames_dir}")
         return False
@@ -85,11 +82,10 @@ def create_mp4_from_frames(frames_dir):
         print(f"Skip (exists): {output_path}")
         return False
 
-    # ffmpeg 序列需单一扩展名；优先 .jpg（与 falling_render 默认一致）
     if glob.glob(jpg_glob):
-        frame_pattern = os.path.join(frames_dir, "frame%04d.jpg")
+        frame_pattern = os.path.join(frames_dir, "frame%d.jpg")
     else:
-        frame_pattern = os.path.join(frames_dir, "frame%04d.jpeg")
+        frame_pattern = os.path.join(frames_dir, "frame%d.jpeg")
 
     try:
         cmd = [
@@ -119,7 +115,7 @@ def create_mp4_from_frames(frames_dir):
 
 
 def process_all_render_dirs(base_dir):
-    """处理 base_dir 下每个 sample_* 子目录（base_dir 即 falling_render.sh 中的 RENDER_DIR_ROOT/jpgs）。"""
+    """处理 base_dir 下每个 sample_* 子目录。"""
     processed = 0
     skipped = 0
 
@@ -171,19 +167,19 @@ def process_sample_range(base_dir, start_id, end_id):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Create MP4s from gravity_falling Blender JPEG frame sequences"
+        description="Create MP4s from gravity_sliding Blender JPEG frame sequences"
     )
     parser.add_argument(
         "base_dir",
         nargs="?",
         default=None,
-        help="帧根目录（与 falling_render.sh 中 RENDER_DIR_ROOT 一致，通常为 .../gravity_falling/jpgs）",
+        help="帧根目录（与 sliding_render.sh 中 RENDER_DIR_ROOT 一致，通常为 .cache/gravity_sliding/jpgs）",
     )
     parser.add_argument(
         "--dir",
         "-d",
         dest="single_dir",
-        help="只处理单个样本目录（例如 .../jpgs/sample_000000）",
+        help="只处理单个样本目录（例如 .../jpgs/sample_0_g_9.81_hdri）",
     )
     parser.add_argument(
         "--sample-range",
@@ -210,9 +206,9 @@ if __name__ == "__main__":
         process_all_render_dirs(args.base_dir)
     else:
         print(
-            "Usage: falling_jpg_to_mp4.py <base_dir>   "
-            "or  falling_jpg_to_mp4.py -d <sample_dir>   "
-            "or  falling_jpg_to_mp4.py <base_dir> --sample-range START END"
+            "Usage: sliding_jpg_to_mp4.py <base_dir>   "
+            "or  sliding_jpg_to_mp4.py -d <sample_dir>   "
+            "or  sliding_jpg_to_mp4.py <base_dir> --sample-range START END"
         )
         parser.print_help()
         raise SystemExit(1)

@@ -15,7 +15,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from falling_jpg_to_mp4 import glob_sample_dir  # noqa: E402
+from sliding_jpg_to_mp4 import glob_sample_dir  # noqa: E402
 
 
 def _frame_index(path):
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "base_dir",
-        help="与 falling_render 的 RENDER_DIR_ROOT 一致（含 sample_*_g_* 子目录）",
+        help="与 sliding_render 的 RENDER_DIR_ROOT 一致（含 sample_*_g_* 子目录）",
     )
     parser.add_argument(
         "--sample-range",
@@ -89,7 +89,7 @@ if __name__ == "__main__":
         "--keep-frame",
         type=int,
         default=1,
-        help="保留的帧序号（默认 1 即 frame0001）",
+        help="保留的帧序号（默认 1 即 frame1）",
     )
     args = parser.parse_args()
     lo, hi = args.sample_range
