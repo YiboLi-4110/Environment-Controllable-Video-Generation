@@ -16,7 +16,7 @@ GROUND_TEXTURE_PATH = ".cache/ground_textures"
 
 # ──────────────── 相机可视范围（由用户提供） ────────────────
 CAM_X_MIN, CAM_X_MAX = -5.8, 5.8
-CAM_Z_MIN, CAM_Z_MAX = 0.0, 4.5
+CAM_Z_MIN, CAM_Z_MAX = 0.0, 5.0
 
 # ──────────────── 斜面 (Wedge) 参数范围 ────────────────
 WEDGE_HEIGHT_RANGE = (2.0, 3.0)

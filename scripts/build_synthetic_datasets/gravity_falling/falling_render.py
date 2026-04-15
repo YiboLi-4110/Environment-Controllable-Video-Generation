@@ -29,11 +29,17 @@ SPHERE_FRICTION_RANGE = (0.25, 0.85)
 # 小球恢复系数：橡胶/塑料球常见中等反弹；与地面对共同决定反弹高度。
 SPHERE_RESTITUTION_RANGE = (0.20, 0.72)
 
-# 静止参考球数量（「几个」）
-REF_AIR_SPHERE_COUNT_RANGE = (2, 4)
-REF_GROUND_SPHERE_COUNT_RANGE = (2, 4)
-# 放置时与已有球心的最小间隙（略大于 0 避免初始穿透）
+# 参考物：空中 / 地面各自「球+方块」总数 2～4，且 Sphere / Cube 各至少 1 个（由拆分函数保证）
+REF_BODY_COUNT_RANGE = (2, 4)
+REF_MIN_PER_SHAPE = 1
+# 下落物：球+方块总数 6～10，每种至少 2 个
+FALLING_BODY_COUNT_RANGE = (6, 10)
+FALLING_MIN_PER_SHAPE = 2
+# 放置时与已有物体等效包围半径的最小间隙（略大于 0 避免初始穿透）
 SPHERE_PLACEMENT_MARGIN = 0.15
+
+# 模板中的 Plane：出现（参与 Passive 碰撞并渲染）的概率；否则完全从物理与画面中移除，小球会穿过原地面位置下落。
+PLANE_VISIBLE_PROBABILITY = 0.6
 
 
 def _world_top_z_mesh(plane):
@@ -45,9 +51,10 @@ def _world_top_z_mesh(plane):
     return max(zs)
 
 
-def _try_place_sphere(radius, z_min, z_max, x_bounds, y_bounds, occupied, max_attempts=120):
+def _try_place_body(clearance_radius, z_min, z_max, x_bounds, y_bounds, occupied, max_attempts=120):
     """
-    在轴对齐盒内随机放置球心，使与 occupied 中每个球 (pos, r) 满足 |c-c'| >= r+r'+margin。
+    在轴对齐盒内随机放置物体中心，使与 occupied 中每项 (pos, radius) 满足
+    |c-c'| >= r + clearance_radius + margin；radius 为与球/方块占位一致的等效包围半径。
     失败返回 None。
     """
     for _ in range(max_attempts):
@@ -58,13 +65,42 @@ def _try_place_sphere(radius, z_min, z_max, x_bounds, y_bounds, occupied, max_at
         ok = True
         for o in occupied:
             op = Vector(o["pos"])
-            need = o["radius"] + radius + SPHERE_PLACEMENT_MARGIN
+            need = o["radius"] + clearance_radius + SPHERE_PLACEMENT_MARGIN
             if (pos - op).length < need:
                 ok = False
                 break
         if ok:
             return (x, y, z)
     return None
+
+
+def _split_ref_sphere_cube_counts():
+    """参考物：总数 2～4，Sphere 与 Cube 各至少 1 个。"""
+    n_total = random.randint(*REF_BODY_COUNT_RANGE)
+    n_spheres = random.randint(REF_MIN_PER_SHAPE, n_total - REF_MIN_PER_SHAPE)
+    n_cubes = n_total - n_spheres
+    return n_spheres, n_cubes
+
+
+def _split_falling_sphere_cube_counts():
+    """下落物：总数 6～10，Sphere 与 Cube 各至少 2 个。"""
+    n_total = random.randint(*FALLING_BODY_COUNT_RANGE)
+    n_spheres = random.randint(FALLING_MIN_PER_SHAPE, n_total - FALLING_MIN_PER_SHAPE)
+    n_cubes = n_total - n_spheres
+    return n_total, n_spheres, n_cubes
+
+
+def _cube_clearance_radius(edge_length):
+    """轴对齐立方体边长 edge，用外接球半径作占位间距。"""
+    return edge_length * math.sqrt(3) * 0.5
+
+
+def _random_cube_rotation(obj):
+    obj.rotation_euler = (
+        random.uniform(0.0, math.tau),
+        random.uniform(0.0, math.tau),
+        random.uniform(0.0, math.tau),
+    )
 
 
 def get_ground_plane():
@@ -76,6 +112,24 @@ def get_ground_plane():
         if o.type == "MESH" and (o.name.startswith("Plane") or "plane" in o.name.lower()):
             return o
     return None
+
+
+def hide_plane_completely(plane):
+    """
+    使 Plane 从刚体世界中消失：移除刚体（无碰撞），并隐藏视口/渲染。
+    与仅 hide_render 不同，必须去掉 rigid body，否则仍会与球碰撞。
+    """
+    if not plane or plane.type != "MESH":
+        return
+
+    bpy.ops.object.select_all(action="DESELECT")
+    plane.select_set(True)
+    bpy.context.view_layer.objects.active = plane
+    if plane.rigid_body:
+        bpy.ops.rigidbody.object_remove()
+
+    plane.hide_render = True
+    plane.hide_viewport = True
 
 
 def apply_ground_textures(plane):
@@ -466,32 +520,36 @@ def setup_supplementary_key_light():
     return energy
 
 
-def spawn_reference_spheres(plane, occupied):
+def spawn_reference_objects(plane, occupied):
     """
-    静止参考物：
-    - 空中：Passive 刚体，不参与动力学但参与碰撞，位置固定。
-    - 地面：Active 刚体，初始静止在平面之上；被下落球撞击后可滚动（Passive 被撞不会动）。
-    occupied：已占位球心列表，本函数会追加，供下落球避让。
+    静止参考物（Sphere + Cube）：
+    - 空中：Passive 刚体，位置固定；球用 SPHERE 碰撞，方块用 BOX。
+    - 地面：Active 刚体，初始在平面之上；同上。
+    各自总数 2～4，且 Sphere / Cube 各至少 1；无地面时仅生成空中参考物。
+    occupied：已占位等效半径列表，本函数会追加，供下落物避让。
     """
     air_meta = []
     ground_meta = []
-    n_air = random.randint(*REF_AIR_SPHERE_COUNT_RANGE)
-    n_ground = random.randint(*REF_GROUND_SPHERE_COUNT_RANGE) if plane else 0
+    n_air_s, n_air_c = _split_ref_sphere_cube_counts()
+    if plane:
+        n_ground_s, n_ground_c = _split_ref_sphere_cube_counts()
+    else:
+        n_ground_s, n_ground_c = 0, 0
 
     top_z = _world_top_z_mesh(plane) if plane else 0.0
 
-    air_idx = 0
-    for _ in range(n_air):
-        r = random.uniform(0.18, 0.55)
-        pos = _try_place_sphere(r, 3.2, 9.5, (-8.5, 8.5), (-1.4, 1.4), occupied)
+    air_s_idx = 0
+    for _ in range(n_air_s):
+        r = random.uniform(0.15, 0.40)
+        pos = _try_place_body(r, 3.2, 5.1, (-5.2, 5.2), (-2.0, 3.5), occupied)
         if pos is None:
             print("Warning: could not place an air reference sphere (spacing); skip one")
             continue
         loc_x, loc_y, loc_z = pos
         bpy.ops.mesh.primitive_uv_sphere_add(radius=r, location=(loc_x, loc_y, loc_z))
         obj = bpy.context.active_object
-        obj.name = f"Ref_Sphere_Air_{air_idx}"
-        air_idx += 1
+        obj.name = f"Ref_Sphere_Air_{air_s_idx}"
+        air_s_idx += 1
         smooth_ball_surface(obj)
         tf = apply_ball_textures(obj)
         bpy.ops.rigidbody.object_add(type="PASSIVE")
@@ -503,6 +561,7 @@ def spawn_reference_spheres(plane, occupied):
         occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r})
         air_meta.append(
             {
+                "shape": "sphere",
                 "name": obj.name,
                 "radius": r,
                 "initial_pos": [loc_x, loc_y, loc_z],
@@ -513,19 +572,54 @@ def spawn_reference_spheres(plane, occupied):
             }
         )
 
-    ground_idx = 0
-    for _ in range(n_ground):
-        r = random.uniform(0.18, 0.55)
+    air_c_idx = 0
+    for _ in range(n_air_c):
+        edge = random.uniform(0.30, 0.80)
+        r_clear = _cube_clearance_radius(edge)
+        pos = _try_place_body(r_clear, 3.2, 5.1, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        if pos is None:
+            print("Warning: could not place an air reference cube (spacing); skip one")
+            continue
+        loc_x, loc_y, loc_z = pos
+        bpy.ops.mesh.primitive_cube_add(size=edge, location=(loc_x, loc_y, loc_z))
+        obj = bpy.context.active_object
+        obj.name = f"Ref_Cube_Air_{air_c_idx}"
+        air_c_idx += 1
+        _random_cube_rotation(obj)
+        tf = apply_ball_textures(obj)
+        bpy.ops.rigidbody.object_add(type="PASSIVE")
+        obj.rigid_body.collision_shape = "BOX"
+        sf = random.uniform(*SPHERE_FRICTION_RANGE)
+        sr = random.uniform(*SPHERE_RESTITUTION_RANGE)
+        obj.rigid_body.friction = sf
+        obj.rigid_body.restitution = sr
+        occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r_clear})
+        air_meta.append(
+            {
+                "shape": "cube",
+                "name": obj.name,
+                "edge": edge,
+                "initial_pos": [loc_x, loc_y, loc_z],
+                "rigid_body": "PASSIVE",
+                "texture_folder": tf,
+                "friction": sf,
+                "restitution": sr,
+            }
+        )
+
+    ground_s_idx = 0
+    for _ in range(n_ground_s):
+        r = random.uniform(0.15, 0.40)
         zc = top_z + r + 0.002
-        pos = _try_place_sphere(r, zc, zc, (-7.5, 7.5), (-1.4, 1.4), occupied)
+        pos = _try_place_body(r, zc, zc, (-5.2, 5.2), (-2.0, 3.5), occupied)
         if pos is None:
             print("Warning: could not place a ground reference sphere (spacing); skip one")
             continue
         loc_x, loc_y, loc_z = pos
         bpy.ops.mesh.primitive_uv_sphere_add(radius=r, location=(loc_x, loc_y, loc_z))
         obj = bpy.context.active_object
-        obj.name = f"Ref_Sphere_Ground_{ground_idx}"
-        ground_idx += 1
+        obj.name = f"Ref_Sphere_Ground_{ground_s_idx}"
+        ground_s_idx += 1
         smooth_ball_surface(obj)
         tf = apply_ball_textures(obj)
         bpy.ops.rigidbody.object_add(type="ACTIVE")
@@ -539,8 +633,48 @@ def spawn_reference_spheres(plane, occupied):
         occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r})
         ground_meta.append(
             {
+                "shape": "sphere",
                 "name": obj.name,
                 "radius": r,
+                "initial_pos": [loc_x, loc_y, loc_z],
+                "rigid_body": "ACTIVE",
+                "texture_folder": tf,
+                "friction": sf,
+                "restitution": sr,
+            }
+        )
+
+    ground_c_idx = 0
+    for _ in range(n_ground_c):
+        edge = random.uniform(0.30, 0.80)
+        r_clear = _cube_clearance_radius(edge)
+        hz = edge * 0.5
+        zc = top_z + hz + 0.002
+        pos = _try_place_body(r_clear, zc, zc, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        if pos is None:
+            print("Warning: could not place a ground reference cube (spacing); skip one")
+            continue
+        loc_x, loc_y, loc_z = pos
+        bpy.ops.mesh.primitive_cube_add(size=edge, location=(loc_x, loc_y, loc_z))
+        obj = bpy.context.active_object
+        obj.name = f"Ref_Cube_Ground_{ground_c_idx}"
+        ground_c_idx += 1
+        _random_cube_rotation(obj)
+        tf = apply_ball_textures(obj)
+        bpy.ops.rigidbody.object_add(type="ACTIVE")
+        obj.rigid_body.type = "ACTIVE"
+        obj.rigid_body.collision_shape = "BOX"
+        obj.rigid_body.mass = 1.0
+        sf = random.uniform(*SPHERE_FRICTION_RANGE)
+        sr = random.uniform(*SPHERE_RESTITUTION_RANGE)
+        obj.rigid_body.friction = sf
+        obj.rigid_body.restitution = sr
+        occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r_clear})
+        ground_meta.append(
+            {
+                "shape": "cube",
+                "name": obj.name,
+                "edge": edge,
                 "initial_pos": [loc_x, loc_y, loc_z],
                 "rigid_body": "ACTIVE",
                 "texture_folder": tf,
@@ -552,60 +686,108 @@ def spawn_reference_spheres(plane, occupied):
     return {"air": air_meta, "ground": ground_meta}
 
 
-def spawn_random_spheres(occupied=None):
-    """随机生成球体数量、位置、尺寸以及随机错峰下落时间；occupied 为已占位球列表以避免初始重叠。"""
+def spawn_falling_objects(occupied=None):
+    """
+    随机生成下落 Sphere / Cube（总数 6～10，每种至少 2）、位置、尺寸与错峰起始帧。
+    Cube 使用 ACTIVE + BOX 碰撞；纹理均经 apply_ball_textures。
+    """
     if occupied is None:
         occupied = []
-    count = random.randint(5, 12) # 5到12个球
-    # 至少3个球从第1帧开始下落
-    n_from_frame_one = random.randint(3, 5)
-    early_indices = list(range(count))
+    n_total, n_spheres, n_cubes = _split_falling_sphere_cube_counts()
+    kinds = ["sphere"] * n_spheres + ["cube"] * n_cubes
+    random.shuffle(kinds)
+
+    n_from_frame_one = random.randint(3, min(5, n_total))
+    early_indices = list(range(n_total))
     random.shuffle(early_indices)
     early_set = set(early_indices[:n_from_frame_one])
 
-    sphere_data = []
-    
-    for i in range(count):
-        # 1. 随机尺寸
-        radius = random.uniform(0.2, 0.8)
+    out_data = []
+    sphere_i = 0
+    cube_i = 0
 
-        # 2. 随机初始位置，与参考球避让（失败则回退为完全随机）
-        pos = _try_place_sphere(radius, 5.0, 10.0, (-9.0, 9.0), (-1.5, 1.5), occupied)
-        if pos is None:
-            loc_x = random.uniform(-9.0, 9.0)
-            loc_y = random.uniform(-1.5, 1.5)
-            loc_z = random.uniform(5.0, 10.0)
+    for i in range(n_total):
+        kind = kinds[i]
+        if kind == "sphere":
+            radius = random.uniform(0.20, 0.45)
+            clearance = radius
+            pos = _try_place_body(clearance, 3.2, 5.1, (-4.8, 4.8), (-2.0, 3.5), occupied)
+            if pos is None:
+                loc_x = random.uniform(-5.2, 5.2)
+                loc_y = random.uniform(-2.0, 3.0)
+                loc_z = random.uniform(3.2, 5.1)
+            else:
+                loc_x, loc_y, loc_z = pos
+            occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": clearance})
+
+            bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, location=(loc_x, loc_y, loc_z))
+            obj = bpy.context.active_object
+            obj.name = f"Falling_Sphere_{sphere_i}"
+            sphere_i += 1
+            smooth_ball_surface(obj)
+            texture_folder = apply_ball_textures(obj)
+
+            bpy.ops.rigidbody.object_add(type="ACTIVE")
+            obj.rigid_body.type = "ACTIVE"
+            obj.rigid_body.collision_shape = "SPHERE"
+            obj.rigid_body.mass = 1.0
+            body_friction = random.uniform(*SPHERE_FRICTION_RANGE)
+            obj.rigid_body.friction = body_friction
+            body_restitution = random.uniform(*SPHERE_RESTITUTION_RANGE)
+            obj.rigid_body.restitution = body_restitution
+
+            rec = {
+                "id": i,
+                "shape": "sphere",
+                "radius": radius,
+                "initial_pos": [loc_x, loc_y, loc_z],
+                "texture_folder": texture_folder,
+                "friction": body_friction,
+                "restitution": body_restitution,
+            }
         else:
-            loc_x, loc_y, loc_z = pos
-        occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": radius})
+            edge = random.uniform(0.35, 0.85)
+            clearance = _cube_clearance_radius(edge)
+            pos = _try_place_body(clearance, 3.2, 5.1, (-4.8, 4.8), (-2.0, 3.5), occupied)
+            if pos is None:
+                loc_x = random.uniform(-5.2, 5.2)
+                loc_y = random.uniform(-2.0, 3.0)
+                loc_z = random.uniform(3.2, 5.1)
+            else:
+                loc_x, loc_y, loc_z = pos
+            occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": clearance})
 
-        bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, location=(loc_x, loc_y, loc_z))
-        obj = bpy.context.active_object
-        obj.name = f"Falling_Sphere_{i}"
-        smooth_ball_surface(obj)
+            bpy.ops.mesh.primitive_cube_add(size=edge, location=(loc_x, loc_y, loc_z))
+            obj = bpy.context.active_object
+            obj.name = f"Falling_Cube_{cube_i}"
+            cube_i += 1
+            _random_cube_rotation(obj)
+            texture_folder = apply_ball_textures(obj)
 
-        # 3. 赋予纹理
-        texture_folder = apply_ball_textures(obj)
+            bpy.ops.rigidbody.object_add(type="ACTIVE")
+            obj.rigid_body.type = "ACTIVE"
+            obj.rigid_body.collision_shape = "BOX"
+            obj.rigid_body.mass = 1.0
+            body_friction = random.uniform(*SPHERE_FRICTION_RANGE)
+            obj.rigid_body.friction = body_friction
+            body_restitution = random.uniform(*SPHERE_RESTITUTION_RANGE)
+            obj.rigid_body.restitution = body_restitution
 
-        # 4. 赋予刚体属性
-        bpy.ops.rigidbody.object_add(type='ACTIVE')
-        obj.rigid_body.type = 'ACTIVE'
-        obj.rigid_body.collision_shape = 'SPHERE'
-        obj.rigid_body.mass = 1.0
-        sphere_friction = random.uniform(*SPHERE_FRICTION_RANGE)
-        obj.rigid_body.friction = sphere_friction
-        sphere_restitution = random.uniform(*SPHERE_RESTITUTION_RANGE)
-        obj.rigid_body.restitution = sphere_restitution
-        
-        # 5. 起始帧：early_set 内固定第 1 帧；其余在 2~40 帧错峰（保证至少 3 个从首帧下落）
+            rec = {
+                "id": i,
+                "shape": "cube",
+                "edge": edge,
+                "initial_pos": [loc_x, loc_y, loc_z],
+                "texture_folder": texture_folder,
+                "friction": body_friction,
+                "restitution": body_restitution,
+            }
+
         if i in early_set:
             start_fall_frame = 1
         else:
             start_fall_frame = random.randint(2, 40)
 
-        # 错峰下落：运动学阶段必须显式锁定 location/rotation，且 kinematic 关键帧须为 CONSTANT 插值。
-        # 否则 Blender 会对 rigid_body.kinematic 做默认（贝塞尔/线性）插值，布尔在帧间变成“中间值”，
-        # 烘焙/渲染时会在动力学与固定初始位姿之间抖动，表现为“已下落又瞬移回起点”的闪现。
         if start_fall_frame > 1:
             obj.rigid_body.kinematic = True
             obj.keyframe_insert(data_path="rigid_body.kinematic", frame=1)
@@ -624,17 +806,10 @@ def spawn_random_spheres(occupied=None):
             ("rigid_body.kinematic", "location", "rotation_euler"),
         )
 
-        # 记录元数据，包括start_fall_frame
-        sphere_data.append({
-            "id": i,
-            "radius": radius,
-            "initial_pos": [loc_x, loc_y, loc_z],
-            "texture_folder": texture_folder,
-            "friction": sphere_friction,
-            "restitution": sphere_restitution,
-            "start_fall_frame": start_fall_frame  # 增加时间戳数据
-        })
-    return sphere_data
+        rec["start_fall_frame"] = start_fall_frame
+        out_data.append(rec)
+
+    return out_data
 
 def bake_and_render(sample_id, render_dir, metadata):
     """执行物理烘焙并渲染序列帧（显式 render，不依赖 CLI 的 -a）"""
@@ -698,22 +873,34 @@ def main():
     ground_texture_name = None
     ground_restitution = None
     ground_friction = None
+    ground_plane_visible = None
     if ground_plane:
-        ground_texture_name = apply_ground_textures(ground_plane)
-        rb_ground = randomize_plane_rigid_body(ground_plane)
-        if rb_ground is not None:
-            ground_restitution, ground_friction = rb_ground
+        ground_plane_visible = random.random() < PLANE_VISIBLE_PROBABILITY
+        if ground_plane_visible:
+            ground_texture_name = apply_ground_textures(ground_plane)
+            rb_ground = randomize_plane_rigid_body(ground_plane)
+            if rb_ground is not None:
+                ground_restitution, ground_friction = rb_ground
+        else:
+            hide_plane_completely(ground_plane)
+            print(
+                "Ground Plane: hidden (rigid body removed, not rendered); "
+                f"fraction with visible plane is {PLANE_VISIBLE_PROBABILITY:.0%}."
+            )
+            # 后续逻辑与「无地面」一致：地面参考球不生成、占位高度不按平面计算
+            ground_plane = None
     else:
         print("Warning: No ground plane (Plane) found; skip ground textures and plane rigid body")
 
     occupied = []
-    reference_spheres = spawn_reference_spheres(ground_plane, occupied)
-    spheres = spawn_random_spheres(occupied)
+    reference_objects = spawn_reference_objects(ground_plane, occupied)
+    falling_objects = spawn_falling_objects(occupied)
 
     metadata = {
         "sample_id": sample_id,
         "gravity_z": g,
         "hdri_file": hdri,
+        # "ground_plane_visible": ground_plane_visible,
         "ground_texture": ground_texture_name,
         # "ground_restitution": ground_restitution,
         # "ground_friction": ground_friction,
@@ -723,8 +910,8 @@ def main():
         #     "sphere_friction": list(SPHERE_FRICTION_RANGE),
         #     "sphere_restitution": list(SPHERE_RESTITUTION_RANGE),
         # },
-        # "reference_spheres": reference_spheres,
-        # "spheres": spheres,
+        # "reference_objects": reference_objects,
+        # "falling_objects": falling_objects,
         "fps": FPS,
         "total_frames": TOTAL_FRAMES,
         "frame_ext": FRAME_EXT,

@@ -912,6 +912,10 @@ def wan_parser():
 
     parser.add_argument("--max_grad_norm", type=float, default=-1, help="Max gradient norm for clipping.")
 
+    encoding_group = parser.add_mutually_exclusive_group()
+    encoding_group.add_argument("--num_encode", action="store_true", help="Use numerical encoding for control signal video (default).")
+    encoding_group.add_argument("--visual_encode", action="store_true", help="Use visual arrow encoding for control signal video.")
+
     return parser
 
 

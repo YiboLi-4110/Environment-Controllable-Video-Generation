@@ -405,7 +405,7 @@ class UnifiedDataset(torch.utils.data.Dataset):
 
 class ControlSignalDataset_Falling(torch.utils.data.Dataset):
     """
-    Dataset for falling-ball videos with gravity as the controllable physical parameter.
+    Dataset for falling-ball/cube videos with gravity as the controllable physical parameter.
     Generates a 3-channel control signal video:
         Ch0: normalized gravity g' = (g - 1) / (20 - 1) filled uniformly across all pixels/frames
         Ch1: vertical gravitational field, linear gradient from +1 (top) to -1 (bottom)
@@ -424,6 +424,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         height=480,
         width=832,
         is_validation_dataset=False,
+        control_signal_encoding="num_encode",
     ):
         self.base_path = base_path
         self.metadata_path = metadata_path
@@ -432,6 +433,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         self.height = height
         self.width = width
         self.is_validation_dataset = is_validation_dataset
+        self.control_signal_encoding = control_signal_encoding
 
         if self.is_validation_dataset:
             self.media_type = "image"
@@ -477,7 +479,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         norm_gravity = 2*temp_gravity - 1.  # -> [-1, 1]
         return norm_gravity
 
-    def _generate_control_video(self, gravity, num_frames, num_channels=3, height=480, width=832):
+    def _generate_control_video_num_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
         controlnet_signal = torch.zeros((num_frames, num_channels, height, width))
 
         g_norm = self._normalize_gravity(gravity)
@@ -486,6 +488,253 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         controlnet_signal[:, 1, :, :] = self._vertical_field[:height, :width]
 
         return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
+
+    def _generate_control_video_visual_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        """
+        Generate an arrow-based control signal video.
+        The arrow is white on a black background, pointing downward.
+        Vertically it spans the full height; horizontally its width is
+        proportional to the gravity value (min→1 pixel, max→full width).
+        The arrow consists of a shaft (1/3 of arrow_width) and a triangular
+        arrowhead (bottom 1/4 of height) that widens to the full arrow_width.
+        All frames are identical (static signal).
+        """
+        frame = torch.zeros((num_channels, height, width))
+
+        ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        ratio = max(0.0, min(1.0, ratio))
+        arrow_width = max(1, int(ratio * width))
+
+        center_x = width // 2
+        half_arrow = arrow_width // 2
+        ax_start = max(0, center_x - half_arrow)
+        ax_end = min(width, ax_start + arrow_width)
+
+        shaft_width = max(1, arrow_width // 3)
+        half_shaft = shaft_width // 2
+        sx_start = max(0, center_x - half_shaft)
+        sx_end = min(width, sx_start + shaft_width)
+
+        arrowhead_h = max(1, height // 4)
+        shaft_end = height - arrowhead_h
+
+        # Draw shaft
+        frame[:, :shaft_end, sx_start:sx_end] = 1.0
+
+        # Draw arrowhead: triangle that widens from shaft_width at top to arrow_width at bottom
+        for dy in range(arrowhead_h):
+            cur_w = shaft_width + int((arrow_width - shaft_width) * dy / max(1, arrowhead_h - 1))
+            half_cw = cur_w // 2
+            tx_start = max(0, center_x - half_cw)
+            tx_end = min(width, tx_start + cur_w)
+            frame[:, shaft_end + dy, tx_start:tx_end] = 1.0
+
+        # Broadcast single frame to all frames (static signal)
+        controlnet_signal = frame.unsqueeze(0).expand(num_frames, -1, -1, -1).contiguous()
+
+        return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
+
+    def _generate_control_video(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        if self.control_signal_encoding == "visual_encode":
+            return self._generate_control_video_visual_encode(gravity, num_frames, num_channels, height, width)
+        else:
+            return self._generate_control_video_num_encode(gravity, num_frames, num_channels, height, width)
+
+    def get_batch(self, idx):
+        item = self.df.iloc[idx]
+        caption = str(item['caption'])
+        file_name = str(item[self.media_type])
+        gravity = float(item['gravity'])
+
+        if self.is_validation_dataset:
+            file_path = os.path.join(self.base_path, "images", file_name)
+            image = Image.open(file_path).convert("RGB")
+            desired_size = (self.width, self.height)
+            if image.size != desired_size:
+                image = image.resize(desired_size, resample=Image.Resampling.LANCZOS)
+            pixel_values = self.to_tensor_transform(image)   # (3, H, W) in [0, 1]
+            pixel_values = 2 * pixel_values - 1              # -> [-1, 1]
+            file_id = file_name.rsplit(".", 1)[0]
+        else:
+            file_path = os.path.join(self.base_path, file_name)
+            pixel_values = load_video_to_pil(file_path)
+
+            if len(pixel_values) > self.num_frames:
+                indices = np.linspace(0, len(pixel_values) - 1, self.num_frames, dtype=int)
+                pixel_values = [pixel_values[i] for i in indices]
+            pixel_values = pixel_values[:self.num_frames]
+
+            pixel_values = torch.stack([self.to_tensor_transform(img) for img in pixel_values])  # (F, 3, H, W) in [0, 1]
+            pixel_values = 2 * pixel_values - 1  # -> [-1, 1]
+            file_id = file_name.rsplit(".mp4", 1)[0]
+
+        return pixel_values, caption, gravity, file_id
+
+    def __getitem__(self, data_id):
+        pixel_values, caption, gravity, file_id = self.get_batch(data_id % len(self.df))
+
+        control_video = self._generate_control_video(
+            gravity,
+            num_frames=self.num_frames,
+            num_channels=3,
+            height=self.height,
+            width=self.width,
+        )
+
+        pixel_values = (pixel_values + 1) / 2  # -> [0, 1]
+        if not self.is_validation_dataset:
+            pil_image_list = [self.to_pil_transform(tensor) for tensor in pixel_values]
+        else:
+            pil_image_list = [self.to_pil_transform(pixel_values)]
+
+        return {
+            "video": pil_image_list,
+            "prompt": caption,
+            "control_video": control_video,
+            "gravity": gravity,
+            "file_id": file_id,
+        }
+
+    def __len__(self):
+        return len(self.df) * self.repeat
+
+
+class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
+    """
+    Dataset for sliding-ball/cube videos with gravity as the controllable physical parameter.
+    Generates a 3-channel control signal video:
+        Ch0: normalized gravity g' = (g - 1) / (20 - 1) filled uniformly across all pixels/frames
+        Ch1: vertical gravitational field, linear gradient from +1 (top) to -1 (bottom)
+        Ch2: all zeros (reserved)
+    """
+
+    GRAVITY_MIN = 1.0
+    GRAVITY_MAX = 20.0
+
+    def __init__(
+        self,
+        base_path=None,
+        metadata_path=None,
+        repeat=1,
+        num_frames=81,
+        height=480,
+        width=832,
+        is_validation_dataset=False,
+        control_signal_encoding="num_encode",
+    ):
+        self.base_path = base_path
+        self.metadata_path = metadata_path
+        self.repeat = repeat
+        self.num_frames = num_frames
+        self.height = height
+        self.width = width
+        self.is_validation_dataset = is_validation_dataset
+        self.control_signal_encoding = control_signal_encoding
+
+        if self.is_validation_dataset:
+            self.media_type = "image"
+            self.blob_ext = "*.jpg"
+        else:
+            self.media_type = "video"
+            self.blob_ext = "*.mp4"
+
+        self.to_tensor_transform = transforms.ToTensor()
+        self.to_pil_transform = transforms.ToPILImage()
+
+        self._vertical_field = torch.linspace(1.0, -1.0, steps=self.height).unsqueeze(1).expand(self.height, self.width)
+
+        self.load_metadata()
+
+    def load_metadata(self):
+        if not self.is_validation_dataset:
+            file_paths = glob.glob(os.path.join(self.base_path, self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
+
+            self.df['checked'] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df['checked'] == 1]
+            self.df.reset_index(drop=True, inplace=True)
+
+            print(f"[ControlSignalDataset_Sliding] Loaded {len(self.df)} training samples from {self.metadata_path}")
+            print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+        else:
+            file_paths = glob.glob(os.path.join(self.base_path, "images", self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
+
+            self.df['checked'] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df['checked'] == 1]
+            self.df.reset_index(drop=True, inplace=True)
+
+            print(f"[ControlSignalDataset_Sliding] Loaded {len(self.df)} validation samples from {self.metadata_path}")
+            if len(self.df) > 0:
+                print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+
+    def _normalize_gravity(self, g):
+        temp_gravity = (g - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        norm_gravity = 2*temp_gravity - 1.  # -> [-1, 1]
+        return norm_gravity
+
+    def _generate_control_video_num_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        controlnet_signal = torch.zeros((num_frames, num_channels, height, width))
+
+        g_norm = self._normalize_gravity(gravity)
+        controlnet_signal[:, 0, :, :] = g_norm
+
+        controlnet_signal[:, 1, :, :] = self._vertical_field[:height, :width]
+
+        return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
+
+    def _generate_control_video_visual_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        """
+        Generate an arrow-based control signal video.
+        The arrow is white on a black background, pointing downward.
+        Vertically it spans the full height; horizontally its width is
+        proportional to the gravity value (min→1 pixel, max→full width).
+        The arrow consists of a shaft (1/3 of arrow_width) and a triangular
+        arrowhead (bottom 1/4 of height) that widens to the full arrow_width.
+        All frames are identical (static signal).
+        """
+        frame = torch.zeros((num_channels, height, width))
+
+        ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        ratio = max(0.0, min(1.0, ratio))
+        arrow_width = max(1, int(ratio * width))
+
+        center_x = width // 2
+        half_arrow = arrow_width // 2
+        ax_start = max(0, center_x - half_arrow)
+        ax_end = min(width, ax_start + arrow_width)
+
+        shaft_width = max(1, arrow_width // 3)
+        half_shaft = shaft_width // 2
+        sx_start = max(0, center_x - half_shaft)
+        sx_end = min(width, sx_start + shaft_width)
+
+        arrowhead_h = max(1, height // 4)
+        shaft_end = height - arrowhead_h
+
+        # Draw shaft
+        frame[:, :shaft_end, sx_start:sx_end] = 1.0
+
+        # Draw arrowhead: triangle that widens from shaft_width at top to arrow_width at bottom
+        for dy in range(arrowhead_h):
+            cur_w = shaft_width + int((arrow_width - shaft_width) * dy / max(1, arrowhead_h - 1))
+            half_cw = cur_w // 2
+            tx_start = max(0, center_x - half_cw)
+            tx_end = min(width, tx_start + cur_w)
+            frame[:, shaft_end + dy, tx_start:tx_end] = 1.0
+
+        # Broadcast single frame to all frames (static signal)
+        controlnet_signal = frame.unsqueeze(0).expand(num_frames, -1, -1, -1).contiguous()
+
+        return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
+
+    def _generate_control_video(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        if self.control_signal_encoding == "visual_encode":
+            return self._generate_control_video_visual_encode(gravity, num_frames, num_channels, height, width)
+        else:
+            return self._generate_control_video_num_encode(gravity, num_frames, num_channels, height, width)
 
     def get_batch(self, idx):
         item = self.df.iloc[idx]

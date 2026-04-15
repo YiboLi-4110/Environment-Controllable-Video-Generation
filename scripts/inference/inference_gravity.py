@@ -62,6 +62,11 @@ def parse_args():
                         help='Path(s) to CSV file(s) for inference')
     parser.add_argument('--controlnet', action="store_true",
                         help='Whether to use controlnet')
+    encoding_group = parser.add_mutually_exclusive_group()
+    encoding_group.add_argument('--num_encode', action='store_true',
+                                help='Use numerical encoding for control signal video (default).')
+    encoding_group.add_argument('--visual_encode', action='store_true',
+                                help='Use visual arrow encoding for control signal video.')
     return parser.parse_args()
 
 
@@ -129,6 +134,9 @@ def main(args):
     print(f"\n[Device {args.device_id}, seed {args.seed}] "
           f"Processing {len(device_examples)} out of {len(args.example_paths)} examples: {device_examples}")
 
+    control_signal_encoding = "visual_encode" if args.visual_encode else "num_encode"
+    print(f"[Device {args.device_id}]   - Control signal encoding: {control_signal_encoding}")
+
     for csv_path in device_examples:
         print(f"\nProcessing CSV: {csv_path}")
 
@@ -141,6 +149,7 @@ def main(args):
             num_frames=NUM_FRAMES,
             height=480,
             width=832,
+            control_signal_encoding=control_signal_encoding,
         )
 
         dataloader = torch.utils.data.DataLoader(

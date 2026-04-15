@@ -44,7 +44,7 @@ def get_random_caption(background_data):
         background_data.get('optimized_prompt_3', '')
     ]
     # 概率分布：0.4, 0.4, 0.2
-    weights = [0.4, 0.4, 0.2]
+    weights = [1/3, 1/3, 1/3]
     return random.choices(prompts, weights=weights, k=1)[0]
 
 

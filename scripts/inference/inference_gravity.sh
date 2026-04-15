@@ -14,6 +14,9 @@ DEVICE_IDS=(0)
 SEED=0
 MODEL_CKPT_PATH="checkpoints/gravity/step-3000.safetensors"
 
+# Control signal encoding: --num_encode (numerical, default) or --visual_encode (arrow-based)
+CONTROL_SIGNAL_ENCODING="--num_encode"
+
 # CSV file paths for inference examples
 EXAMPLE_PATHS=(
   "datasets/gravity/test/benchmark/a.csv"
@@ -29,6 +32,7 @@ echo " World size: ${WORLD_SIZE}"
 echo " Seed:       ${SEED}"
 echo " Checkpoint: ${MODEL_CKPT_PATH}"
 echo " Examples:   ${EXAMPLE_PATHS[*]}"
+echo " Encoding:   ${CONTROL_SIGNAL_ENCODING}"
 echo "========================================="
 
 PIDS=()
@@ -43,7 +47,8 @@ for i in "${!DEVICE_IDS[@]}"; do
         --seed "${SEED}" \
         --model_ckpt_path "${MODEL_CKPT_PATH}" \
         --example_paths "${EXAMPLE_PATHS[@]}" \
-        --controlnet &
+        --controlnet \
+        ${CONTROL_SIGNAL_ENCODING} &
 
     PIDS+=($!)
 done

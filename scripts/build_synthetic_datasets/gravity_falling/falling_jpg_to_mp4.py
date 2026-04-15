@@ -87,9 +87,9 @@ def create_mp4_from_frames(frames_dir):
 
     # ffmpeg 序列需单一扩展名；优先 .jpg（与 falling_render 默认一致）
     if glob.glob(jpg_glob):
-        frame_pattern = os.path.join(frames_dir, "frame%04d.jpg")
+        frame_pattern = os.path.join(frames_dir, "frame%d.jpg")
     else:
-        frame_pattern = os.path.join(frames_dir, "frame%04d.jpeg")
+        frame_pattern = os.path.join(frames_dir, "frame%d.jpeg")
 
     try:
         cmd = [

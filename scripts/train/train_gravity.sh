@@ -13,8 +13,14 @@ CONTROLNET_NUM_LAYERS=8
 
 CONTROL_SIGNAL_TYPE="gravity"
 
+# Control signal encoding: --num_encode (numerical, default) or --visual_encode (arrow-based)
+CONTROL_SIGNAL_ENCODING="--num_encode"
+
 DATASET_BASE_PATH_FALLING="datasets/train/falling_4k"
 DATASET_METADATA_PATH_FALLING="datasets/train/falling_4k.csv"
+
+DATASET_BASE_PATH_SLIDING="datasets/train/sliding_4k"
+DATASET_METADATA_PATH_SLIDING="datasets/train/sliding_4k.csv"
 
 # 本地 wandb 元数据目录名；并行多卡/多任务时改为不同名称（如 wandb1、wandb2）避免冲突
 WANDB_DIR="wandb"
@@ -22,8 +28,8 @@ WANDB_DIR="wandb"
 accelerate launch \
   --config_file scripts/accelerate/accelerate_config_4_gpu_multi_gpu.yaml \
   scripts/train/train.py \
-  --dataset_base_path ${DATASET_BASE_PATH_FALLING} \
-  --dataset_metadata_path ${DATASET_METADATA_PATH_FALLING} \
+  --dataset_base_path ${DATASET_BASE_PATH_FALLING} ${DATASET_BASE_PATH_SLIDING} \
+  --dataset_metadata_path ${DATASET_METADATA_PATH_FALLING} ${DATASET_METADATA_PATH_SLIDING} \
   --control_signal_type ${CONTROL_SIGNAL_TYPE} \
   --controlnet_num_layers ${CONTROLNET_NUM_LAYERS} \
   --height 480 \
@@ -45,4 +51,5 @@ accelerate launch \
   --dataset_num_workers 2 \
   --offline_load \
   --wandb_logging \
-  --wandb_dir ${WANDB_DIR}
+  --wandb_dir ${WANDB_DIR} \
+  ${CONTROL_SIGNAL_ENCODING}

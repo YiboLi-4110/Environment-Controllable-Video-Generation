@@ -2,6 +2,7 @@ __pycache__/
 .vscode/
 .cursor/
 .DS_Store
+.cache/
 
 diffsynth.egg-info
 temp/

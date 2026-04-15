@@ -8,7 +8,7 @@ for path in sys.path:
 import torch, os
 from src.physical_constant.wan_video_new import WanVideoPipeline, ModelConfig
 from src.physical_constant.utils import DiffusionTrainingModule, launch_training_task, wan_parser
-from src.physical_constant.unified_dataset import ControlSignalDataset_Falling
+from src.physical_constant.unified_dataset import ControlSignalDataset_Falling, ControlSignalDataset_Sliding
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -132,15 +132,30 @@ def get_dataset(args):
 
     if args.control_signal_type == "gravity":
 
-        dataset = ControlSignalDataset_Falling(
+        control_signal_encoding = "visual_encode" if args.visual_encode else "num_encode"
+
+        dataset_falling = ControlSignalDataset_Falling(
             base_path=args.dataset_base_path[0],
             metadata_path=args.dataset_metadata_path[0],
             repeat=args.dataset_repeat,
             num_frames=args.num_frames,
             height=args.height,
             width=args.width,
+            control_signal_encoding=control_signal_encoding,
         )
 
+        dataset_sliding = ControlSignalDataset_Sliding(
+            base_path=args.dataset_base_path[1],
+            metadata_path=args.dataset_metadata_path[1],
+            repeat=args.dataset_repeat,
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            control_signal_encoding=control_signal_encoding,
+        )
+
+        print(f"[get_dataset] control_signal_encoding = {control_signal_encoding}")
+        dataset = torch.utils.data.ConcatDataset([dataset_falling, dataset_sliding])
     else:
         raise NotImplementedError(f"Unknown control_signal_type: {args.control_signal_type}")
 
