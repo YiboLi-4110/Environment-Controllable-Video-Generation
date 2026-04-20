@@ -494,22 +494,27 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         Generate an arrow-based control signal video.
         The arrow is white on a black background, pointing downward.
         Vertically it spans the full height; horizontally its width is
-        proportional to the gravity value (min→1 pixel, max→full width).
-        The arrow consists of a shaft (1/3 of arrow_width) and a triangular
-        arrowhead (bottom 1/4 of height) that widens to the full arrow_width.
+        proportional to the gravity value (min→1/5 width, max→3/5 width).
+        The arrow consists of a shaft and a triangular arrowhead that tapers
+        from shaft width to a point at the bottom of the frame.
         All frames are identical (static signal).
         """
         frame = torch.zeros((num_channels, height, width))
 
         ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
         ratio = max(0.0, min(1.0, ratio))
-        arrow_width = max(1, int(ratio * width))
+
+        # 设置箭头宽度范围：最小1/5宽度，最大3/5宽度
+        min_arrow_width = int(width * 2 / 7)
+        max_arrow_width = int(width * 5 / 7)
+        arrow_width = min_arrow_width + int(ratio * (max_arrow_width - min_arrow_width))
 
         center_x = width // 2
         half_arrow = arrow_width // 2
         ax_start = max(0, center_x - half_arrow)
         ax_end = min(width, ax_start + arrow_width)
 
+        # 箭杆宽度为箭头宽度的1/3
         shaft_width = max(1, arrow_width // 3)
         half_shaft = shaft_width // 2
         sx_start = max(0, center_x - half_shaft)
@@ -518,18 +523,30 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         arrowhead_h = max(1, height // 4)
         shaft_end = height - arrowhead_h
 
-        # Draw shaft
+        # 绘制箭杆
         frame[:, :shaft_end, sx_start:sx_end] = 1.0
 
-        # Draw arrowhead: triangle that widens from shaft_width at top to arrow_width at bottom
+        # 绘制箭头：先水平展开，再逐渐收束
+        arrowhead_max_width = arrow_width
+        expand_end = arrowhead_h // 2
+        
         for dy in range(arrowhead_h):
-            cur_w = shaft_width + int((arrow_width - shaft_width) * dy / max(1, arrowhead_h - 1))
+            if dy <= expand_end:
+                # 展开阶段：从箭杆宽度逐渐增加到箭头最大宽度
+                progress = dy / expand_end if expand_end > 0 else 0
+                cur_w = shaft_width + int((arrowhead_max_width - shaft_width) * progress)
+            else:
+                # 收束阶段：从箭头最大宽度逐渐收束到1像素
+                progress = (dy - expand_end) / (arrowhead_h - expand_end - 1) if (arrowhead_h - expand_end - 1) > 0 else 0
+                cur_w = arrowhead_max_width - int((arrowhead_max_width - 1) * progress)
+            
+            cur_w = max(1, cur_w)
             half_cw = cur_w // 2
             tx_start = max(0, center_x - half_cw)
             tx_end = min(width, tx_start + cur_w)
             frame[:, shaft_end + dy, tx_start:tx_end] = 1.0
 
-        # Broadcast single frame to all frames (static signal)
+        # 广播单个帧到所有帧（静态信号）
         controlnet_signal = frame.unsqueeze(0).expand(num_frames, -1, -1, -1).contiguous()
 
         return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
@@ -690,23 +707,28 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         Generate an arrow-based control signal video.
         The arrow is white on a black background, pointing downward.
         Vertically it spans the full height; horizontally its width is
-        proportional to the gravity value (min→1 pixel, max→full width).
-        The arrow consists of a shaft (1/3 of arrow_width) and a triangular
-        arrowhead (bottom 1/4 of height) that widens to the full arrow_width.
+        proportional to the gravity value (min→1/5 width, max→3/5 width).
+        The arrow consists of a shaft and a triangular arrowhead that tapers
+        from shaft width to a point at the bottom of the frame.
         All frames are identical (static signal).
         """
         frame = torch.zeros((num_channels, height, width))
 
         ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
         ratio = max(0.0, min(1.0, ratio))
-        arrow_width = max(1, int(ratio * width))
+
+        # 设置箭头宽度范围：最小0.2宽度，最大0.8宽度
+        min_arrow_width = int(width * 0.2)
+        max_arrow_width = int(width * 0.8)
+        arrow_width = min_arrow_width + int(ratio * (max_arrow_width - min_arrow_width))
 
         center_x = width // 2
         half_arrow = arrow_width // 2
         ax_start = max(0, center_x - half_arrow)
         ax_end = min(width, ax_start + arrow_width)
 
-        shaft_width = max(1, arrow_width // 3)
+        # 箭杆宽度为箭头宽度的3/5
+        shaft_width = max(1, arrow_width * (3 / 5))
         half_shaft = shaft_width // 2
         sx_start = max(0, center_x - half_shaft)
         sx_end = min(width, sx_start + shaft_width)
@@ -714,18 +736,30 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         arrowhead_h = max(1, height // 4)
         shaft_end = height - arrowhead_h
 
-        # Draw shaft
+        # 绘制箭杆
         frame[:, :shaft_end, sx_start:sx_end] = 1.0
 
-        # Draw arrowhead: triangle that widens from shaft_width at top to arrow_width at bottom
+        # 绘制箭头：先水平展开，再逐渐收束
+        arrowhead_max_width = arrow_width
+        expand_end = arrowhead_h // 2
+        
         for dy in range(arrowhead_h):
-            cur_w = shaft_width + int((arrow_width - shaft_width) * dy / max(1, arrowhead_h - 1))
+            if dy <= expand_end:
+                # 展开阶段：从箭杆宽度逐渐增加到箭头最大宽度
+                progress = dy / expand_end if expand_end > 0 else 0
+                cur_w = shaft_width + int((arrowhead_max_width - shaft_width) * progress)
+            else:
+                # 收束阶段：从箭头最大宽度逐渐收束到1像素
+                progress = (dy - expand_end) / (arrowhead_h - expand_end - 1) if (arrowhead_h - expand_end - 1) > 0 else 0
+                cur_w = arrowhead_max_width - int((arrowhead_max_width - 1) * progress)
+            
+            cur_w = max(1, cur_w)
             half_cw = cur_w // 2
             tx_start = max(0, center_x - half_cw)
             tx_end = min(width, tx_start + cur_w)
             frame[:, shaft_end + dy, tx_start:tx_end] = 1.0
 
-        # Broadcast single frame to all frames (static signal)
+        # 广播单个帧到所有帧（静态信号）
         controlnet_signal = frame.unsqueeze(0).expand(num_frames, -1, -1, -1).contiguous()
 
         return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)

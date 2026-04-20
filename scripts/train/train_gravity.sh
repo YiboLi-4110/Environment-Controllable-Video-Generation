@@ -16,11 +16,11 @@ CONTROL_SIGNAL_TYPE="gravity"
 # Control signal encoding: --num_encode (numerical, default) or --visual_encode (arrow-based)
 CONTROL_SIGNAL_ENCODING="--num_encode"
 
-DATASET_BASE_PATH_FALLING="datasets/train/falling_4k"
-DATASET_METADATA_PATH_FALLING="datasets/train/falling_4k.csv"
+DATASET_BASE_PATH_FALLING="datasets/gravity/train/falling_4k"
+DATASET_METADATA_PATH_FALLING="datasets/gravity/train/falling_4k.csv"
 
-DATASET_BASE_PATH_SLIDING="datasets/train/sliding_4k"
-DATASET_METADATA_PATH_SLIDING="datasets/train/sliding_4k.csv"
+DATASET_BASE_PATH_SLIDING="datasets/gravity/train/sliding_4k"
+DATASET_METADATA_PATH_SLIDING="datasets/gravity/train/sliding_4k.csv"
 
 # 本地 wandb 元数据目录名；并行多卡/多任务时改为不同名称（如 wandb1、wandb2）避免冲突
 WANDB_DIR="wandb"

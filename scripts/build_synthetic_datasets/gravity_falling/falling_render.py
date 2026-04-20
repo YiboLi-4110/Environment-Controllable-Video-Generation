@@ -23,7 +23,7 @@ GROUND_TEXTURE_PATH = ".cache/ground_textures"
 # 避免接近 0 的极端打滑（除非刻意模拟冰面），也避免全 1 导致数值过黏。
 GROUND_FRICTION_RANGE = (0.35, 0.90)
 # 地面恢复系数：真实路面/地垫对宏观碰撞的 e 多数 <0.5；0~0.95 过宽易产生不自然的超高弹。
-GROUND_RESTITUTION_RANGE = (0.0, 0.50)
+GROUND_RESTITUTION_RANGE = (0.10, 0.25)
 # 小球摩擦：与另一物体摩擦共同决定切向滑动；随机化可区分「表面材质」而不只依赖地面。
 SPHERE_FRICTION_RANGE = (0.25, 0.85)
 # 小球恢复系数：橡胶/塑料球常见中等反弹；与地面对共同决定反弹高度。
@@ -40,6 +40,31 @@ SPHERE_PLACEMENT_MARGIN = 0.15
 
 # 模板中的 Plane：出现（参与 Passive 碰撞并渲染）的概率；否则完全从物理与画面中移除，小球会穿过原地面位置下落。
 PLANE_VISIBLE_PROBABILITY = 0.6
+
+# --- 由尺寸决定质量：质量 = 密度 × 几何体积（场景单位为米，质量为千克，与 Blender 刚体默认一致）---
+# 球体：各半径共用「实心橡胶」密度。真实篮球多为空心；合成数据用表皮材质量级的实心近似，取工程手册中
+# 硫化橡胶常见区间约 1100–1500 kg/m³ 的中值（如 ASM / 橡胶材料表）。
+# 考虑空心篮球，设置密度为100kg/m³
+SPHERE_DENSITY_KG_M3 = 100.0
+# 方块：各边长共用「实体木材」密度，取软木–硬木常用文献区间约 450–900 kg/m³ 的代表值（家具/结构材常见量级）。
+CUBE_DENSITY_KG_M3 = 650.0
+
+
+def _sphere_volume_m3(radius):
+    return (4.0 / 3.0) * math.pi * (radius**3)
+
+
+def _cube_volume_m3(edge_length):
+    """primitive_cube_add(size=edge) 的边长为 edge，轴对齐立方体体积 edge³。"""
+    return edge_length**3
+
+
+def _sphere_mass_kg(radius):
+    return SPHERE_DENSITY_KG_M3 * _sphere_volume_m3(radius)
+
+
+def _cube_mass_kg(edge_length):
+    return CUBE_DENSITY_KG_M3 * _cube_volume_m3(edge_length)
 
 
 def _world_top_z_mesh(plane):
@@ -540,8 +565,8 @@ def spawn_reference_objects(plane, occupied):
 
     air_s_idx = 0
     for _ in range(n_air_s):
-        r = random.uniform(0.15, 0.40)
-        pos = _try_place_body(r, 3.2, 5.1, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        r = random.uniform(0.05, 0.125)
+        pos = _try_place_body(r, 0.8, 1.25, (-1.04, 1.04), (0.7, 1.7), occupied)
         if pos is None:
             print("Warning: could not place an air reference sphere (spacing); skip one")
             continue
@@ -559,6 +584,7 @@ def spawn_reference_objects(plane, occupied):
         obj.rigid_body.friction = sf
         obj.rigid_body.restitution = sr
         occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r})
+        m = _sphere_mass_kg(r)
         air_meta.append(
             {
                 "shape": "sphere",
@@ -569,14 +595,16 @@ def spawn_reference_objects(plane, occupied):
                 "texture_folder": tf,
                 "friction": sf,
                 "restitution": sr,
+                "mass": m,
+                "density_kg_m3": SPHERE_DENSITY_KG_M3,
             }
         )
 
     air_c_idx = 0
     for _ in range(n_air_c):
-        edge = random.uniform(0.30, 0.80)
+        edge = random.uniform(0.07, 0.20)
         r_clear = _cube_clearance_radius(edge)
-        pos = _try_place_body(r_clear, 3.2, 5.1, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        pos = _try_place_body(r_clear, 0.8, 1.25, (-1.04, 1.04), (0.7, 1.7), occupied)
         if pos is None:
             print("Warning: could not place an air reference cube (spacing); skip one")
             continue
@@ -594,6 +622,7 @@ def spawn_reference_objects(plane, occupied):
         obj.rigid_body.friction = sf
         obj.rigid_body.restitution = sr
         occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": r_clear})
+        m = _cube_mass_kg(edge)
         air_meta.append(
             {
                 "shape": "cube",
@@ -604,14 +633,16 @@ def spawn_reference_objects(plane, occupied):
                 "texture_folder": tf,
                 "friction": sf,
                 "restitution": sr,
+                "mass": m,
+                "density_kg_m3": CUBE_DENSITY_KG_M3,
             }
         )
 
     ground_s_idx = 0
     for _ in range(n_ground_s):
-        r = random.uniform(0.15, 0.40)
+        r = random.uniform(0.05, 0.125)
         zc = top_z + r + 0.002
-        pos = _try_place_body(r, zc, zc, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        pos = _try_place_body(r, zc, zc, (-1.04, 1.04), (0.7, 1.7), occupied)
         if pos is None:
             print("Warning: could not place a ground reference sphere (spacing); skip one")
             continue
@@ -625,7 +656,7 @@ def spawn_reference_objects(plane, occupied):
         bpy.ops.rigidbody.object_add(type="ACTIVE")
         obj.rigid_body.type = "ACTIVE"
         obj.rigid_body.collision_shape = "SPHERE"
-        obj.rigid_body.mass = 1.0
+        obj.rigid_body.mass = _sphere_mass_kg(r)
         sf = random.uniform(*SPHERE_FRICTION_RANGE)
         sr = random.uniform(*SPHERE_RESTITUTION_RANGE)
         obj.rigid_body.friction = sf
@@ -641,16 +672,18 @@ def spawn_reference_objects(plane, occupied):
                 "texture_folder": tf,
                 "friction": sf,
                 "restitution": sr,
+                "mass": obj.rigid_body.mass,
+                "density_kg_m3": SPHERE_DENSITY_KG_M3,
             }
         )
 
     ground_c_idx = 0
     for _ in range(n_ground_c):
-        edge = random.uniform(0.30, 0.80)
+        edge = random.uniform(0.07, 0.20)
         r_clear = _cube_clearance_radius(edge)
         hz = edge * 0.5
         zc = top_z + hz + 0.002
-        pos = _try_place_body(r_clear, zc, zc, (-5.2, 5.2), (-2.0, 3.5), occupied)
+        pos = _try_place_body(r_clear, zc, zc, (-1.04, 1.04), (0.7, 1.7), occupied)
         if pos is None:
             print("Warning: could not place a ground reference cube (spacing); skip one")
             continue
@@ -659,12 +692,12 @@ def spawn_reference_objects(plane, occupied):
         obj = bpy.context.active_object
         obj.name = f"Ref_Cube_Ground_{ground_c_idx}"
         ground_c_idx += 1
-        _random_cube_rotation(obj)
+        # _random_cube_rotation(obj)
         tf = apply_ball_textures(obj)
         bpy.ops.rigidbody.object_add(type="ACTIVE")
         obj.rigid_body.type = "ACTIVE"
         obj.rigid_body.collision_shape = "BOX"
-        obj.rigid_body.mass = 1.0
+        obj.rigid_body.mass = _cube_mass_kg(edge)
         sf = random.uniform(*SPHERE_FRICTION_RANGE)
         sr = random.uniform(*SPHERE_RESTITUTION_RANGE)
         obj.rigid_body.friction = sf
@@ -680,6 +713,8 @@ def spawn_reference_objects(plane, occupied):
                 "texture_folder": tf,
                 "friction": sf,
                 "restitution": sr,
+                "mass": obj.rigid_body.mass,
+                "density_kg_m3": CUBE_DENSITY_KG_M3,
             }
         )
 
@@ -709,13 +744,13 @@ def spawn_falling_objects(occupied=None):
     for i in range(n_total):
         kind = kinds[i]
         if kind == "sphere":
-            radius = random.uniform(0.20, 0.45)
+            radius = random.uniform(0.05, 0.125)
             clearance = radius
-            pos = _try_place_body(clearance, 3.2, 5.1, (-4.8, 4.8), (-2.0, 3.5), occupied)
+            pos = _try_place_body(clearance, 0.8, 1.25, (-1.04, 1.04), (0.7, 1.7), occupied)
             if pos is None:
-                loc_x = random.uniform(-5.2, 5.2)
-                loc_y = random.uniform(-2.0, 3.0)
-                loc_z = random.uniform(3.2, 5.1)
+                loc_x = random.uniform(-1.04, 1.04)
+                loc_y = random.uniform(0.7, 1.7)
+                loc_z = random.uniform(0.8, 1.25)
             else:
                 loc_x, loc_y, loc_z = pos
             occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": clearance})
@@ -730,7 +765,7 @@ def spawn_falling_objects(occupied=None):
             bpy.ops.rigidbody.object_add(type="ACTIVE")
             obj.rigid_body.type = "ACTIVE"
             obj.rigid_body.collision_shape = "SPHERE"
-            obj.rigid_body.mass = 1.0
+            obj.rigid_body.mass = _sphere_mass_kg(radius)
             body_friction = random.uniform(*SPHERE_FRICTION_RANGE)
             obj.rigid_body.friction = body_friction
             body_restitution = random.uniform(*SPHERE_RESTITUTION_RANGE)
@@ -744,15 +779,17 @@ def spawn_falling_objects(occupied=None):
                 "texture_folder": texture_folder,
                 "friction": body_friction,
                 "restitution": body_restitution,
+                "mass": obj.rigid_body.mass,
+                "density_kg_m3": SPHERE_DENSITY_KG_M3,
             }
         else:
-            edge = random.uniform(0.35, 0.85)
+            edge = random.uniform(0.07, 0.20)
             clearance = _cube_clearance_radius(edge)
-            pos = _try_place_body(clearance, 3.2, 5.1, (-4.8, 4.8), (-2.0, 3.5), occupied)
+            pos = _try_place_body(clearance, 0.8, 1.25, (-1.04, 1.04), (0.7, 1.7), occupied)
             if pos is None:
-                loc_x = random.uniform(-5.2, 5.2)
-                loc_y = random.uniform(-2.0, 3.0)
-                loc_z = random.uniform(3.2, 5.1)
+                loc_x = random.uniform(-1.04, 1.04)
+                loc_y = random.uniform(0.7, 1.7)
+                loc_z = random.uniform(0.8, 1.25)
             else:
                 loc_x, loc_y, loc_z = pos
             occupied.append({"pos": (loc_x, loc_y, loc_z), "radius": clearance})
@@ -767,7 +804,7 @@ def spawn_falling_objects(occupied=None):
             bpy.ops.rigidbody.object_add(type="ACTIVE")
             obj.rigid_body.type = "ACTIVE"
             obj.rigid_body.collision_shape = "BOX"
-            obj.rigid_body.mass = 1.0
+            obj.rigid_body.mass = _cube_mass_kg(edge)
             body_friction = random.uniform(*SPHERE_FRICTION_RANGE)
             obj.rigid_body.friction = body_friction
             body_restitution = random.uniform(*SPHERE_RESTITUTION_RANGE)
@@ -781,6 +818,8 @@ def spawn_falling_objects(occupied=None):
                 "texture_folder": texture_folder,
                 "friction": body_friction,
                 "restitution": body_restitution,
+                "mass": obj.rigid_body.mass,
+                "density_kg_m3": CUBE_DENSITY_KG_M3,
             }
 
         if i in early_set:

@@ -19,7 +19,7 @@ import numpy as np
 import argparse
 import json
 
-CONTROLNET_NUM_LAYERS = 10
+CONTROLNET_NUM_LAYERS = 8
 NUM_FRAMES = 81
 
 SKIP_MODEL_LOADING_FOR_DEBUGGING_DATA = False
@@ -206,7 +206,7 @@ def main(args):
                 video_array = np.moveaxis(video_array, 1, -1)
 
                 video_with_prompt = add_aesthetic_gravity_prompt_to_video(
-                    video_array, gravity, num_frames_with_signal=16)
+                    video_array, gravity, num_frames_with_signal=81)
                 video_with_prompt = [
                     dataset.to_pil_transform(torch.from_numpy(frame).permute(2, 0, 1))
                     for frame in video_with_prompt

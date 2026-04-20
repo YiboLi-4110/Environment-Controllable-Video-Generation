@@ -15,31 +15,31 @@ TEXTURE_PATH = ".cache/football_textures"
 GROUND_TEXTURE_PATH = ".cache/ground_textures"
 
 # ──────────────── 相机可视范围（由用户提供） ────────────────
-CAM_X_MIN, CAM_X_MAX = -5.8, 5.8
-CAM_Z_MIN, CAM_Z_MAX = 0.0, 5.0
+CAM_X_MIN, CAM_X_MAX = -1.7, 1.7
+CAM_Z_MIN, CAM_Z_MAX = 0.0, 2.0
 
 # ──────────────── 斜面 (Wedge) 参数范围 ────────────────
-WEDGE_HEIGHT_RANGE = (2.0, 3.0)
-WEDGE_BASE_RANGE = (1.8, 2.5)
-WEDGE_WIDTH_RANGE = (4.0, 5.2)
-LOCX_RANGE = (4.0, 4.4)
-LOCY_RANGE = (7.8, 13.0)
+WEDGE_HEIGHT_RANGE = (0.7, 1.1)
+WEDGE_BASE_RANGE = (0.6, 1.1)
+WEDGE_WIDTH_RANGE = (1.3, 1.8)
+LOCX_RANGE = (1.2, 1.55)
+LOCY_RANGE = (4.2, 5.2)
 
 # ──────────────── 物理参数 ────────────────
 GROUND_FRICTION_RANGE = (0.35, 0.90)
 GROUND_RESTITUTION_RANGE = (0.0, 0.50)
 WEDGE_FRICTION_RANGE = (0.30, 0.40)
-WEDGE_RESTITUTION_RANGE = (0.05, 0.40)
+WEDGE_RESTITUTION_RANGE = (0.05, 0.20)
 SLIDER_FRICTION_RANGE = (0.20, 0.30)
-SLIDER_RESTITUTION_RANGE = (0.05, 0.30)
+SLIDER_RESTITUTION_RANGE = (0.0, 0.10)
 ROLLER_FRICTION_RANGE = (0.15, 0.65)
 ROLLER_RESTITUTION_RANGE = (0.10, 0.50)
 
-SLIDER_SCALE_RANGE = (1.0, 1.5)
-ROLLER_RADIUS_RANGE = (0.7, 1.0)
+SLIDER_SCALE_RANGE = (0.34, 0.54)
+ROLLER_RADIUS_RANGE = (0.17, 0.27)
 
 # 滑块与滚球共用材料密度 ρ（kg / Blender 长度单位³）；m_立方体 = ρ·s³，m_球 = ρ·(4/3)πr³
-OBJECT_MATERIAL_DENSITY = 4.5
+OBJECT_MATERIAL_DENSITY = 100
 
 
 def _world_top_z_mesh(obj):
@@ -500,6 +500,8 @@ def randomize_plane_rigid_body(plane):
     else:
         plane.rigid_body.type = "PASSIVE"
     plane.rigid_body.collision_shape = "MESH"
+    plane.rigid_body.use_margin = True
+    plane.rigid_body.collision_margin = 0.002
     friction = random.uniform(*GROUND_FRICTION_RANGE)
     plane.rigid_body.friction = friction
     restitution = random.uniform(*GROUND_RESTITUTION_RANGE)
@@ -664,6 +666,8 @@ def spawn_wedges(ground_plane):
             bpy.ops.rigidbody.object_add(type="PASSIVE")
         wedge.rigid_body.type = "PASSIVE"
         wedge.rigid_body.collision_shape = "MESH"
+        wedge.rigid_body.use_margin = True
+        wedge.rigid_body.collision_margin = 0.002
         w_friction = random.uniform(*WEDGE_FRICTION_RANGE)
         w_restitution = random.uniform(*WEDGE_RESTITUTION_RANGE)
         wedge.rigid_body.friction = w_friction
@@ -758,26 +762,28 @@ def place_object_on_wedge(wedge_data, obj_type="slider"):
         wedge_obj, height, width, frac
     )
 
-    eps = 5e-2
+    margin = 0.002
+
     if obj_type == "slider":
         scale_factor = random.uniform(*SLIDER_SCALE_RANGE)
         half_size = 0.5 * scale_factor
 
         # 法向偏移 = 半边长（底面中心到立方体几何中心的距离）
-        final_pos = surface_pt + normal * half_size * (1 + eps)
-
+        final_pos = surface_pt + normal * (half_size + margin)
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=final_pos)
         obj = bpy.context.active_object
         obj.name = "Slider_Active"
         obj.scale = (scale_factor, scale_factor, scale_factor)
 
         # 让立方体底面平行于斜面：先匹配 wedge 的 Z 旋转，再绕局部 X 轴倾斜
-        obj.rotation_euler = (-(math.pi / 2 - slope_angle), 0, rot_z)
+        obj.rotation_euler = (slope_angle, 0, rot_z)
 
         bpy.context.view_layer.update()
 
         bpy.ops.rigidbody.object_add(type="ACTIVE")
         obj.rigid_body.collision_shape = "BOX"
+        obj.rigid_body.use_margin = True
+        obj.rigid_body.collision_margin = margin
         vol = scale_factor ** 3
         obj.rigid_body.mass = OBJECT_MATERIAL_DENSITY * vol
         s_friction = random.uniform(*SLIDER_FRICTION_RANGE)
@@ -804,7 +810,7 @@ def place_object_on_wedge(wedge_data, obj_type="slider"):
         radius = random.uniform(*ROLLER_RADIUS_RANGE)
 
         # 球体：法向偏移 = radius，球心刚好贴在斜面上
-        final_pos = surface_pt + normal * radius * (1 + eps)
+        final_pos = surface_pt + normal * (radius + margin)
 
         bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, location=final_pos)
         obj = bpy.context.active_object
@@ -815,6 +821,8 @@ def place_object_on_wedge(wedge_data, obj_type="slider"):
 
         bpy.ops.rigidbody.object_add(type="ACTIVE")
         obj.rigid_body.collision_shape = "SPHERE"
+        obj.rigid_body.use_margin = True
+        obj.rigid_body.collision_margin = margin
         vol = (4.0 / 3.0) * math.pi * (radius ** 3)
         obj.rigid_body.mass = OBJECT_MATERIAL_DENSITY * vol
         r_friction = random.uniform(*ROLLER_FRICTION_RANGE)
