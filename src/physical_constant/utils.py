@@ -916,6 +916,50 @@ def wan_parser():
     encoding_group.add_argument("--num_encode", action="store_true", help="Use numerical encoding for control signal video (default).")
     encoding_group.add_argument("--visual_encode", action="store_true", help="Use visual arrow encoding for control signal video.")
 
+    # --- Control signal dropout (CFG-style null conditioning) ---
+    parser.add_argument("--syn_ctrl_dropout_prob", type=float, default=0.1,
+                        help="Probability of replacing the synthetic control signal with an all-zero null tensor "
+                             "during training (CFG-style dropout). Default 0.1.")
+    parser.add_argument("--real_ctrl_dropout_prob", type=float, default=0.3,
+                        help="Probability of replacing the real-data control signal with an all-zero null tensor "
+                             "during training. Higher than synthetic because real scenes vary widely in gravity "
+                             "evidence strength. Default 0.3.")
+
+    # --- Curriculum learning ---
+    parser.add_argument("--curriculum_mode", default=False, action="store_true",
+                        help="Enable three-phase curriculum learning (syn-only → mixed → mixed).")
+    parser.add_argument("--lr1", type=float, default=3e-5,
+                        help="Peak learning rate reached at the end of Phase-1 warm-up (curriculum mode only).")
+    parser.add_argument("--lr2", type=float, default=5e-6,
+                        help="Final learning rate held constant in Phase-3 (curriculum mode only).")
+    parser.add_argument("--warmup_steps", type=int, default=200,
+                        help="Number of optimizer steps for the linear warm-up in Phase-1.")
+    parser.add_argument("--phase1_epochs", type=int, default=2,
+                        help="Epochs for Phase-1: synthetic-only data with linear warm-up then constant LR.")
+    parser.add_argument("--phase2_epochs", type=int, default=2,
+                        help="Epochs for Phase-2: mixed data with cosine decay from lr1 to lr2.")
+    parser.add_argument("--phase3_epochs", type=int, default=1,
+                        help="Epochs for Phase-3: mixed data (real-biased) with constant lr2.")
+    parser.add_argument("--phase2_syn_ratio", type=float, default=0.5,
+                        help="Fraction of synthetic samples in Phase-2 mixed dataset (0–1). Default 0.5 → 50/50.")
+    parser.add_argument("--phase3_syn_ratio", type=float, default=0.25,
+                        help="Fraction of synthetic samples in Phase-3 mixed dataset (0–1). Default 0.25 → 25%% syn / 75%% real.")
+    parser.add_argument("--dataset_base_path_real", type=str, default=None,
+                        help="Base directory of the real-world dataset (curriculum mode only).")
+    parser.add_argument("--dataset_metadata_path_real", type=str, default=None,
+                        help="Path to the CSV metadata file for the real-world dataset (curriculum mode only).")
+    parser.add_argument("--real_color_jitter", default=False, action="store_true",
+                        help="Apply light ColorJitter augmentation to real data to narrow sim-to-real gap.")
+    parser.add_argument("--resume_phase", type=int, default=None, choices=[1, 2, 3],
+                        help="Resume curriculum training from this phase (requires --controlnet_checkpoint).")
+    parser.add_argument("--data_volume", type=int, default=None,
+                        help="Fixed number of samples to use per epoch across all curriculum phases. "
+                             "If the available data is less than data_volume, a warning is printed and "
+                             "all available samples are used. If more is available, a random subset of "
+                             "exactly data_volume samples is drawn each epoch. "
+                             "When not set, Phase 1 uses the full syn_dataset and mixed phases use "
+                             "n_syn_total + n_real_total (original behaviour).")
+
     return parser
 
 
@@ -986,3 +1030,312 @@ def qwen_image_parser():
     parser.add_argument("--enable_fp8_training", default=False, action="store_true", help="Whether to enable FP8 training. Only available for LoRA training on a single GPU.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
     return parser
+
+# ---------------------------------------------------------------------------
+# Curriculum-learning helpers
+# ---------------------------------------------------------------------------
+
+def _build_syn_subset(
+    syn_dataset: torch.utils.data.Dataset,
+    n: int,
+) -> torch.utils.data.Dataset:
+    """
+    Randomly draw ``n`` items from ``syn_dataset``.
+
+    If ``n`` exceeds the dataset size, a warning is printed and all available
+    samples are used (no repetition / oversampling).
+    """
+    n_avail = len(syn_dataset)
+    if n > n_avail:
+        print(
+            f"[curriculum] WARNING: data_volume={n} exceeds syn dataset size "
+            f"({n_avail}). Using all {n_avail} available samples."
+        )
+        n = n_avail
+    indices = torch.randperm(n_avail)[:n].tolist()
+    subset = torch.utils.data.Subset(syn_dataset, indices)
+    print(f"[curriculum] Built syn-only subset: {n} samples (data_volume cap)")
+    return subset
+
+
+def _build_mixed_subset(
+    syn_dataset: torch.utils.data.Dataset,
+    real_dataset: torch.utils.data.Dataset,
+    syn_ratio: float,
+    total_samples: int,
+) -> torch.utils.data.Dataset:
+    """
+    Randomly draw ``total_samples`` items from syn/real datasets
+    according to ``syn_ratio`` and return a shuffled ConcatDataset.
+
+    Called every epoch so that the sampled subset changes each round,
+    preventing the model from over-fitting to a fixed sub-collection.
+    """
+    n_syn = round(syn_ratio * total_samples)
+    n_real = total_samples - n_syn
+
+    n_syn_avail = len(syn_dataset)
+    n_real_avail = len(real_dataset)
+
+    # If a split requests more samples than available, clamp and warn.
+    if n_syn > n_syn_avail:
+        print(f"[curriculum] Requested {n_syn} syn samples but only {n_syn_avail} available. Clamping.")
+        n_syn = n_syn_avail
+    if n_real > n_real_avail:
+        print(f"[curriculum] Requested {n_real} real samples but only {n_real_avail} available. Clamping.")
+        n_real = n_real_avail
+
+    syn_indices = torch.randperm(n_syn_avail)[:n_syn].tolist()
+    real_indices = torch.randperm(n_real_avail)[:n_real].tolist()
+
+    syn_subset = torch.utils.data.Subset(syn_dataset, syn_indices)
+    real_subset = torch.utils.data.Subset(real_dataset, real_indices)
+
+    mixed = torch.utils.data.ConcatDataset([syn_subset, real_subset])
+    print(f"[curriculum] Built mixed dataset: {n_syn} syn + {n_real} real = {len(mixed)} total")
+    return mixed
+
+
+def _build_phase_scheduler(optimizer, phase: int, args, total_phase2_steps: int):
+    """
+    Return the LR scheduler appropriate for the given phase.
+
+    Phase 1: LinearLR warm-up (0→lr1 over warmup_steps) then ConstantLR at lr1.
+             Implemented as a SequentialLR.
+    Phase 2: CosineAnnealingLR from lr1 → lr2 over total_phase2_steps.
+    Phase 3: ConstantLR at lr2 (optimizer LR is already set to lr2 on entry).
+    """
+    if phase == 1:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.01,
+            end_factor=1.0,
+            total_iters=args.warmup_steps,
+        )
+        constant = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0, total_iters=1)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, constant],
+            milestones=[args.warmup_steps],
+        )
+    elif phase == 2:
+        # eta_min is the absolute LR value we want at the end of cosine.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_phase2_steps,
+            eta_min=args.lr2,
+        )
+    else:  # phase == 3
+        scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0, total_iters=1)
+    return scheduler
+
+
+def launch_curriculum_training_task(
+    syn_dataset: torch.utils.data.Dataset,
+    real_dataset: torch.utils.data.Dataset,
+    model: "DiffusionTrainingModule",
+    args,
+):
+    """
+    Three-phase curriculum training:
+
+    Phase 1 – Synthetic only, linear warm-up to lr1 then constant lr1.
+    Phase 2 – Mixed (phase2_syn_ratio syn / rest real), cosine decay lr1→lr2.
+    Phase 3 – Mixed (phase3_syn_ratio syn / rest real), constant lr2.
+
+    A single AdamW optimizer instance is shared across all three phases so
+    that first/second moment estimates carry over at phase boundaries.
+    """
+    lr1 = args.lr1
+    lr2 = args.lr2
+    weight_decay = args.weight_decay
+    num_workers = args.dataset_num_workers
+    save_steps = args.save_steps
+    gradient_accumulation_steps = args.gradient_accumulation_steps
+    find_unused_parameters = args.find_unused_parameters
+
+    phase_epochs = {1: args.phase1_epochs, 2: args.phase2_epochs, 3: args.phase3_epochs}
+
+    # Total samples to draw for mixed phases (use full syn dataset size as reference).
+    n_syn_total = len(syn_dataset)
+    n_real_total = len(real_dataset)
+    mixed_total = n_syn_total + n_real_total
+
+    # ------------------------------------------------------------------
+    # data_volume: fixed per-epoch sample budget (optional).
+    # When set, every epoch – across all three phases – draws exactly
+    # data_volume samples.  If data_volume > available data, a warning is
+    # printed and all available samples are used instead.
+    # ------------------------------------------------------------------
+    data_volume: int | None = getattr(args, "data_volume", None)
+    if data_volume is not None:
+        print(
+            f"[curriculum] data_volume={data_volume} is set. "
+            f"Each epoch will use exactly {data_volume} samples "
+            f"(syn_avail={n_syn_total}, real_avail={n_real_total}, "
+            f"mixed_avail={mixed_total})."
+        )
+        if data_volume > mixed_total:
+            print(
+                f"[curriculum] WARNING: data_volume={data_volume} exceeds total "
+                f"available samples ({mixed_total}). Mixed phases will be clamped "
+                f"to available data."
+            )
+    # epoch_total: effective per-epoch budget used for scheduler estimation
+    epoch_total = data_volume if data_volume is not None else mixed_total
+
+    # ------------------------------------------------------------------
+    # Accelerator & optimizer (single instance for all phases)
+    # ------------------------------------------------------------------
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
+    )
+
+    optimizer = torch.optim.AdamW(
+        model.trainable_modules(), lr=lr1, weight_decay=weight_decay
+    )
+    model, optimizer = accelerator.prepare(model, optimizer)
+
+    # ------------------------------------------------------------------
+    # W&B + output path (main process only)
+    # ------------------------------------------------------------------
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        datetime_str = get_datetime_str()
+        run_name = args.wandb_run_name if args.wandb_run_name else f"curriculum_{datetime_str}"
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            config=args,
+            dir=args.wandb_dir,
+        )
+        if args.controlnet_checkpoint is None:
+            args.output_path = os.path.join(args.output_path, datetime_str)
+            os.makedirs(args.output_path, exist_ok=True)
+            print(f"\n[curriculum] Training from scratch. Output: {args.output_path}\n")
+        else:
+            args.output_path = os.path.dirname(args.controlnet_checkpoint)
+            print(f"\n[curriculum] Resuming from {args.controlnet_checkpoint}. Output: {args.output_path}\n")
+
+    model_logger = ModelLogger(args.output_path, remove_prefix_in_ckpt=args.remove_prefix_in_ckpt)
+
+    # Restore step counter when resuming from a step checkpoint.
+    if args.controlnet_checkpoint is not None:
+        ckpt_name = os.path.basename(args.controlnet_checkpoint)
+        if "step-" in ckpt_name:
+            step_num_initial = int(ckpt_name.split("step-")[1].split(".")[0])
+            model_logger.num_steps = step_num_initial + 1
+
+    # ------------------------------------------------------------------
+    # Determine starting phase (for resume support)
+    # ------------------------------------------------------------------
+    start_phase = args.resume_phase if (args.resume_phase is not None) else 1
+
+    # Estimate steps-per-epoch for Phase-2 cosine total.
+    # Use epoch_total (= data_volume if set, else mixed_total) as the per-epoch
+    # sample budget; each GPU sees epoch_total/num_gpus samples.
+    num_processes = accelerator.num_processes
+    steps_per_epoch_phase2 = math.ceil(
+        (epoch_total / num_processes) / gradient_accumulation_steps
+    )
+    total_phase2_steps = steps_per_epoch_phase2 * phase_epochs[2]
+
+    global_epoch_counter = 0  # used only for non-phase-aware checkpoint names
+
+    for phase in [1, 2, 3]:
+        if phase < start_phase:
+            continue
+
+        print(f"\n{'='*60}")
+        print(f"  Starting Phase {phase}")
+        print(f"{'='*60}\n")
+
+        # ---- Adjust optimizer LR at phase boundary ----
+        if phase == 3:
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr2
+
+        # ---- Build per-phase scheduler ----
+        scheduler = _build_phase_scheduler(optimizer, phase, args, total_phase2_steps)
+        scheduler = accelerator.prepare(scheduler)
+
+        for epoch_id in range(phase_epochs[phase]):
+            # ---- (Re)build dataset & dataloader every epoch ----
+            # When data_volume is set every phase draws exactly data_volume samples
+            # (with a warning if data_volume > available).  Without data_volume the
+            # original behaviour is preserved: Phase 1 uses the full syn_dataset,
+            # mixed phases use all available syn + real data.
+            if phase == 1:
+                if data_volume is not None:
+                    dataset_epoch = _build_syn_subset(syn_dataset, data_volume)
+                else:
+                    dataset_epoch = syn_dataset
+            elif phase == 2:
+                dataset_epoch = _build_mixed_subset(
+                    syn_dataset, real_dataset,
+                    syn_ratio=args.phase2_syn_ratio,
+                    total_samples=epoch_total,
+                )
+            else:  # phase == 3
+                dataset_epoch = _build_mixed_subset(
+                    syn_dataset, real_dataset,
+                    syn_ratio=args.phase3_syn_ratio,
+                    total_samples=epoch_total,
+                )
+
+            print(f"[curriculum] Phase {phase} Epoch {epoch_id} | dataset size: {len(dataset_epoch)}")
+
+            dataloader = torch.utils.data.DataLoader(
+                dataset_epoch,
+                shuffle=True,
+                collate_fn=safe_collate,
+                num_workers=num_workers,
+            )
+            dataloader = accelerator.prepare(dataloader)
+
+            for data_id, data in tqdm(enumerate(dataloader)):
+                is_bad_batch_locally = (data is None) or (
+                    not data_is_correct_shape_and_type(data, args.control_signal_type, args.num_frames)
+                )
+                if should_skip_batch(accelerator, is_bad_batch_locally):
+                    if accelerator.is_main_process:
+                        print("--> Bad batch detected. Skipping. <--")
+                    continue
+
+                with accelerator.accumulate(model):
+                    optimizer.zero_grad()
+                    loss = model(data)
+                    accelerator.backward(loss)
+
+                    grad_norm = None
+                    if args.max_grad_norm > -1 and accelerator.sync_gradients:
+                        grad_norm = accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
+                    optimizer.step()
+
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    model_logger.on_step_end(
+                        accelerator, model, loss, current_lr,
+                        save_steps=save_steps, log_to_wandb_every=10, grad_norm=grad_norm,
+                    )
+
+                    scheduler.step()
+
+                    # Log curriculum phase to W&B.
+                    if model_logger.num_steps % 10 == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            wandb.log({"curriculum_phase": phase}, step=model_logger.num_steps)
+
+            # ---- Save checkpoint at end of each epoch ----
+            ckpt_name = f"phase{phase}_epoch{epoch_id}.safetensors"
+            model_logger.save_model(accelerator, model, ckpt_name)
+            if accelerator.is_main_process:
+                print(f"[curriculum] Saved checkpoint: {ckpt_name}")
+
+            global_epoch_counter += 1
+
+    model_logger.on_training_end(accelerator, model, save_steps)
+    if accelerator.is_main_process:
+        print("\n[curriculum] Training complete.\n")

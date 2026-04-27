@@ -8,6 +8,7 @@ import pickle
 import cv2
 import glob
 import math
+import random
 from torchvision import transforms
 from einops import rearrange
 from typing import List
@@ -63,6 +64,98 @@ def load_video_to_pil(video_path: str) -> List[Image.Image]:
         # This is done in a 'finally' block to ensure it happens
         # even if an error occurs during frame reading.
         cap.release()
+
+    return pil_frames
+
+
+def load_video_to_pil_real(
+    video_path: str,
+    num_frames: int,
+    target_fps: float,
+    target_height: int,
+    target_width: int,
+) -> List[Image.Image]:
+    """
+    Load a real-world video with three normalizations applied in sequence:
+
+    1. **Fps-aware temporal sampling** — computes the target clip duration
+       (``num_frames / target_fps``), uniformly distributes ``num_frames``
+       timestamps over ``[0, min(video_duration, target_duration)]``, and
+       seeks to the nearest source frame for each timestamp.  This ensures
+       that physical motion dynamics (e.g. gravity-driven trajectories) are
+       temporally consistent regardless of the source frame-rate.
+
+    2. **Aspect-ratio-preserving center crop + LANCZOS resize** — crops the
+       largest centered region that matches the target aspect ratio, then
+       resizes to ``(target_width, target_height)``.  Avoids the geometric
+       distortion caused by a direct stretch-resize.
+
+    3. **Last-frame padding** — if the source video is shorter than the
+       target clip, the last decoded frame is repeated until exactly
+       ``num_frames`` frames are available.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video: {video_path}")
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS)
+    total_src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if src_fps <= 0 or total_src_frames <= 0:
+        cap.release()
+        raise IOError(
+            f"Invalid video metadata (fps={src_fps}, frames={total_src_frames}): {video_path}"
+        )
+
+    # 1. Fps-aware temporal sampling
+    target_duration = num_frames / target_fps           # e.g. 81 / 16 ≈ 5.06 s
+    video_duration  = total_src_frames / src_fps
+    actual_duration = min(target_duration, video_duration)
+
+    timestamps    = np.linspace(0.0, actual_duration, num_frames, endpoint=True)
+    frame_indices = np.clip(
+        np.round(timestamps * src_fps).astype(int),
+        0, total_src_frames - 1,
+    )
+
+    target_ratio = target_width / target_height
+
+    pil_frames: List[Image.Image] = []
+    for idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img   = Image.fromarray(frame_rgb)
+
+        # 2. Aspect-ratio-preserving center crop + resize
+        w, h      = pil_img.size
+        src_ratio = w / h
+        if src_ratio > target_ratio:
+            new_w = int(round(h * target_ratio))
+            new_h = h
+        else:
+            new_w = w
+            new_h = int(round(w / target_ratio))
+
+        left    = (w - new_w) // 2
+        top     = (h - new_h) // 2
+        pil_img = pil_img.crop((left, top, left + new_w, top + new_h))
+        pil_img = pil_img.resize(
+            (target_width, target_height), resample=Image.Resampling.LANCZOS
+        )
+        pil_frames.append(pil_img)
+
+    cap.release()
+
+    if not pil_frames:
+        raise IOError(f"No frames could be decoded from: {video_path}")
+
+    # 3. Last-frame padding
+    while len(pil_frames) < num_frames:
+        pil_frames.append(pil_frames[-1].copy())
 
     return pil_frames
 
@@ -425,6 +518,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         width=832,
         is_validation_dataset=False,
         control_signal_encoding="num_encode",
+        ctrl_dropout_prob=0.0,
     ):
         self.base_path = base_path
         self.metadata_path = metadata_path
@@ -434,6 +528,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         self.width = width
         self.is_validation_dataset = is_validation_dataset
         self.control_signal_encoding = control_signal_encoding
+        self.ctrl_dropout_prob = ctrl_dropout_prob
 
         if self.is_validation_dataset:
             self.media_type = "image"
@@ -494,7 +589,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         Generate an arrow-based control signal video.
         The arrow is white on a black background, pointing downward.
         Vertically it spans the full height; horizontally its width is
-        proportional to the gravity value (min→1/5 width, max→3/5 width).
+        proportional to the gravity value (min→1/6 width, max→1/2 width).
         The arrow consists of a shaft and a triangular arrowhead that tapers
         from shaft width to a point at the bottom of the frame.
         All frames are identical (static signal).
@@ -504,9 +599,9 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
         ratio = max(0.0, min(1.0, ratio))
 
-        # 设置箭头宽度范围：最小1/5宽度，最大3/5宽度
-        min_arrow_width = int(width * 2 / 7)
-        max_arrow_width = int(width * 5 / 7)
+        # 设置箭头宽度范围：最小1/6宽度，最大1/2宽度
+        min_arrow_width = int(width * 1 / 6)
+        max_arrow_width = int(width * 1 / 2)
         arrow_width = min_arrow_width + int(ratio * (max_arrow_width - min_arrow_width))
 
         center_x = width // 2
@@ -514,8 +609,8 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         ax_start = max(0, center_x - half_arrow)
         ax_end = min(width, ax_start + arrow_width)
 
-        # 箭杆宽度为箭头宽度的1/3
-        shaft_width = max(1, arrow_width // 3)
+        # 箭杆宽度为箭头宽度的1/2
+        shaft_width = max(1, arrow_width // 2)
         half_shaft = shaft_width // 2
         sx_start = max(0, center_x - half_shaft)
         sx_end = min(width, sx_start + shaft_width)
@@ -531,7 +626,7 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
         expand_end = arrowhead_h // 2
         
         for dy in range(arrowhead_h):
-            if dy <= expand_end:
+            if dy <= 1:
                 # 展开阶段：从箭杆宽度逐渐增加到箭头最大宽度
                 progress = dy / expand_end if expand_end > 0 else 0
                 cur_w = shaft_width + int((arrowhead_max_width - shaft_width) * progress)
@@ -598,6 +693,11 @@ class ControlSignalDataset_Falling(torch.utils.data.Dataset):
             width=self.width,
         )
 
+        # Prompt dropout: drop text prompt to force the model to rely on the control
+        # signal for generation, which directly strengthens ControlNet conditioning.
+        if self.ctrl_dropout_prob > 0.0 and random.random() < self.ctrl_dropout_prob:
+            caption = ""
+
         pixel_values = (pixel_values + 1) / 2  # -> [0, 1]
         if not self.is_validation_dataset:
             pil_image_list = [self.to_pil_transform(tensor) for tensor in pixel_values]
@@ -638,6 +738,7 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         width=832,
         is_validation_dataset=False,
         control_signal_encoding="num_encode",
+        ctrl_dropout_prob=0.0,
     ):
         self.base_path = base_path
         self.metadata_path = metadata_path
@@ -647,6 +748,7 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         self.width = width
         self.is_validation_dataset = is_validation_dataset
         self.control_signal_encoding = control_signal_encoding
+        self.ctrl_dropout_prob = ctrl_dropout_prob
 
         if self.is_validation_dataset:
             self.media_type = "image"
@@ -707,7 +809,7 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         Generate an arrow-based control signal video.
         The arrow is white on a black background, pointing downward.
         Vertically it spans the full height; horizontally its width is
-        proportional to the gravity value (min→1/5 width, max→3/5 width).
+        proportional to the gravity value (min→1/6 width, max→1/2 width).
         The arrow consists of a shaft and a triangular arrowhead that tapers
         from shaft width to a point at the bottom of the frame.
         All frames are identical (static signal).
@@ -717,9 +819,9 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
         ratio = max(0.0, min(1.0, ratio))
 
-        # 设置箭头宽度范围：最小0.2宽度，最大0.8宽度
-        min_arrow_width = int(width * 0.2)
-        max_arrow_width = int(width * 0.8)
+        # 设置箭头宽度范围：最小1/6宽度，最大1/2宽度
+        min_arrow_width = int(width * 1 / 6)
+        max_arrow_width = int(width * 1 / 2)
         arrow_width = min_arrow_width + int(ratio * (max_arrow_width - min_arrow_width))
 
         center_x = width // 2
@@ -727,8 +829,8 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         ax_start = max(0, center_x - half_arrow)
         ax_end = min(width, ax_start + arrow_width)
 
-        # 箭杆宽度为箭头宽度的3/5
-        shaft_width = max(1, arrow_width * (3 / 5))
+        # 箭杆宽度为箭头宽度的1/2
+        shaft_width = max(1, arrow_width // 2)
         half_shaft = shaft_width // 2
         sx_start = max(0, center_x - half_shaft)
         sx_end = min(width, sx_start + shaft_width)
@@ -744,7 +846,7 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
         expand_end = arrowhead_h // 2
         
         for dy in range(arrowhead_h):
-            if dy <= expand_end:
+            if dy <= 1:
                 # 展开阶段：从箭杆宽度逐渐增加到箭头最大宽度
                 progress = dy / expand_end if expand_end > 0 else 0
                 cur_w = shaft_width + int((arrowhead_max_width - shaft_width) * progress)
@@ -810,6 +912,259 @@ class ControlSignalDataset_Sliding(torch.utils.data.Dataset):
             height=self.height,
             width=self.width,
         )
+
+        # Prompt dropout: drop text prompt to force the model to rely on the control
+        # signal for generation, which directly strengthens ControlNet conditioning.
+        if self.ctrl_dropout_prob > 0.0 and random.random() < self.ctrl_dropout_prob:
+            caption = ""
+
+        pixel_values = (pixel_values + 1) / 2  # -> [0, 1]
+        if not self.is_validation_dataset:
+            pil_image_list = [self.to_pil_transform(tensor) for tensor in pixel_values]
+        else:
+            pil_image_list = [self.to_pil_transform(pixel_values)]
+
+        return {
+            "video": pil_image_list,
+            "prompt": caption,
+            "control_video": control_video,
+            "gravity": gravity,
+            "file_id": file_id,
+        }
+
+    def __len__(self):
+        return len(self.df) * self.repeat
+
+class ControlSignalDataset_Real(torch.utils.data.Dataset):
+    """
+    Real-world gravity videos. Same data contract as ``ControlSignalDataset_Falling`` / ``Sliding``:
+    direct subclass of ``torch.utils.data.Dataset``, same 3-channel control signal, same
+    ``{video, prompt, control_video, gravity, file_id}`` output (see Falling for encoding).
+
+    CSV ``gravity`` should list Earth g (e.g. 9.81) per row. Optional ColorJitter on pixels;
+    ``ctrl_dropout_prob`` follows the same CFG-style null-conditioning pattern as the synthetic classes.
+    """
+
+    GRAVITY_MIN = 1.0
+    GRAVITY_MAX = 20.0
+
+    def __init__(
+        self,
+        base_path=None,
+        metadata_path=None,
+        repeat=1,
+        num_frames=81,
+        height=480,
+        width=832,
+        is_validation_dataset=False,
+        control_signal_encoding="num_encode",
+        ctrl_dropout_prob=0.0,
+        enable_color_jitter=False,
+        target_fps=16.0,
+    ):
+        self.base_path = base_path
+        self.metadata_path = metadata_path
+        self.repeat = repeat
+        self.num_frames = num_frames
+        self.height = height
+        self.width = width
+        self.is_validation_dataset = is_validation_dataset
+        self.control_signal_encoding = control_signal_encoding
+        self.ctrl_dropout_prob = ctrl_dropout_prob
+        self.enable_color_jitter = enable_color_jitter
+        self.target_fps = target_fps
+        self._color_jitter = (
+            transforms.ColorJitter(brightness=0.1, contrast=0.1) if enable_color_jitter else None
+        )
+
+        if self.is_validation_dataset:
+            self.media_type = "image"
+            self.blob_ext = "*.jpg"
+        else:
+            self.media_type = "video"
+            self.blob_ext = "*.mp4"
+
+        self.to_tensor_transform = transforms.ToTensor()
+        self.to_pil_transform = transforms.ToPILImage()
+
+        self._vertical_field = torch.linspace(1.0, -1.0, steps=self.height).unsqueeze(1).expand(self.height, self.width)
+
+        self.load_metadata()
+
+    def load_metadata(self):
+        if not self.is_validation_dataset:
+            file_paths = glob.glob(os.path.join(self.base_path, self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
+
+            self.df["checked"] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df["checked"] == 1]
+            self.df.reset_index(drop=True, inplace=True)
+
+            print(f"[ControlSignalDataset_Real] Loaded {len(self.df)} training samples from {self.metadata_path}")
+            print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+        else:
+            file_paths = glob.glob(os.path.join(self.base_path, "images", self.blob_ext))
+            file_names = set(os.path.basename(x) for x in file_paths)
+            self.df = pandas.read_csv(self.metadata_path)
+
+            self.df["checked"] = self.df[self.media_type].map(lambda x, files=file_names: int(x in files))
+            self.df = self.df[self.df["checked"] == 1]
+            self.df.reset_index(drop=True, inplace=True)
+
+            print(f"[ControlSignalDataset_Real] Loaded {len(self.df)} validation samples from {self.metadata_path}")
+            if len(self.df) > 0:
+                print(f"  gravity range in csv: [{self.df['gravity'].min()}, {self.df['gravity'].max()}]")
+
+    def _normalize_gravity(self, g):
+        temp_gravity = (g - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        norm_gravity = 2 * temp_gravity - 1.0  # -> [-1, 1]
+        return norm_gravity
+
+    def _generate_control_video_num_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        controlnet_signal = torch.zeros((num_frames, num_channels, height, width))
+
+        g_norm = self._normalize_gravity(gravity)
+        controlnet_signal[:, 0, :, :] = g_norm
+
+        controlnet_signal[:, 1, :, :] = self._vertical_field[:height, :width]
+
+        return rearrange(controlnet_signal, "f c h w -> f h w c").to(torch.bfloat16)
+
+    def _generate_control_video_visual_encode(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        """
+        Generate an arrow-based control signal video.
+        The arrow is white on a black background, pointing downward.
+        Vertically it spans the full height; horizontally its width is
+        proportional to the gravity value (min→1/6 width, max→1/2 width).
+        The arrow consists of a shaft and a triangular arrowhead that tapers
+        from shaft width to a point at the bottom of the frame.
+        All frames are identical (static signal).
+        """
+        frame = torch.zeros((num_channels, height, width))
+
+        ratio = (gravity - self.GRAVITY_MIN) / (self.GRAVITY_MAX - self.GRAVITY_MIN)
+        ratio = max(0.0, min(1.0, ratio))
+
+        # 设置箭头宽度范围：最小1/6宽度，最大1/2宽度
+        min_arrow_width = int(width * 1 / 6)
+        max_arrow_width = int(width * 1 / 2)
+        arrow_width = min_arrow_width + int(ratio * (max_arrow_width - min_arrow_width))
+
+        center_x = width // 2
+        half_arrow = arrow_width // 2
+        ax_start = max(0, center_x - half_arrow)
+        ax_end = min(width, ax_start + arrow_width)
+
+        # 箭杆宽度为箭头宽度的1/2
+        shaft_width = max(1, arrow_width // 2)
+        half_shaft = shaft_width // 2
+        sx_start = max(0, center_x - half_shaft)
+        sx_end = min(width, sx_start + shaft_width)
+
+        arrowhead_h = max(1, height // 4)
+        shaft_end = height - arrowhead_h
+
+        # 绘制箭杆
+        frame[:, :shaft_end, sx_start:sx_end] = 1.0
+
+        # 绘制箭头：先水平展开，再逐渐收束
+        arrowhead_max_width = arrow_width
+        expand_end = arrowhead_h // 2
+        
+        for dy in range(arrowhead_h):
+            if dy <= 1:
+                # 展开阶段：从箭杆宽度逐渐增加到箭头最大宽度
+                progress = dy / expand_end if expand_end > 0 else 0
+                cur_w = shaft_width + int((arrowhead_max_width - shaft_width) * progress)
+            else:
+                # 收束阶段：从箭头最大宽度逐渐收束到1像素
+                progress = (dy - expand_end) / (arrowhead_h - expand_end - 1) if (arrowhead_h - expand_end - 1) > 0 else 0
+                cur_w = arrowhead_max_width - int((arrowhead_max_width - 1) * progress)
+            
+            cur_w = max(1, cur_w)
+            half_cw = cur_w // 2
+            tx_start = max(0, center_x - half_cw)
+            tx_end = min(width, tx_start + cur_w)
+            frame[:, shaft_end + dy, tx_start:tx_end] = 1.0
+
+        # 广播单个帧到所有帧（静态信号）
+        controlnet_signal = frame.unsqueeze(0).expand(num_frames, -1, -1, -1).contiguous()
+
+        return rearrange(controlnet_signal, 'f c h w -> f h w c').to(torch.bfloat16)
+
+    def _generate_control_video(self, gravity, num_frames, num_channels=3, height=480, width=832):
+        if self.control_signal_encoding == "visual_encode":
+            return self._generate_control_video_visual_encode(gravity, num_frames, num_channels, height, width)
+        else:
+            return self._generate_control_video_num_encode(gravity, num_frames, num_channels, height, width)
+
+    def get_batch(self, idx):
+        item = self.df.iloc[idx]
+        caption = str(item["caption"])
+        file_name = str(item[self.media_type])
+        gravity = float(item["gravity"])
+
+        if self.is_validation_dataset:
+            file_path = os.path.join(self.base_path, "images", file_name)
+            image = Image.open(file_path).convert("RGB")
+
+            # Aspect-ratio-preserving center crop + resize (same strategy as training)
+            w, h = image.size
+            target_ratio = self.width / self.height
+            src_ratio = w / h
+            if src_ratio > target_ratio:
+                new_w = int(round(h * target_ratio))
+                new_h = h
+            else:
+                new_w = w
+                new_h = int(round(w / target_ratio))
+            left = (w - new_w) // 2
+            top  = (h - new_h) // 2
+            image = image.crop((left, top, left + new_w, top + new_h))
+            image = image.resize((self.width, self.height), resample=Image.Resampling.LANCZOS)
+
+            if self._color_jitter is not None:
+                image = self._color_jitter(image)
+            pixel_values = self.to_tensor_transform(image)
+            pixel_values = 2 * pixel_values - 1
+            file_id = file_name.rsplit(".", 1)[0]
+        else:
+            file_path = os.path.join(self.base_path, file_name)
+
+            # Fps-aware temporal sampling + center crop resize + last-frame padding
+            pixel_values = load_video_to_pil_real(
+                file_path,
+                num_frames=self.num_frames,
+                target_fps=self.target_fps,
+                target_height=self.height,
+                target_width=self.width,
+            )
+
+            if self._color_jitter is not None:
+                pixel_values = [self._color_jitter(img) for img in pixel_values]
+
+            pixel_values = torch.stack([self.to_tensor_transform(img) for img in pixel_values])
+            pixel_values = 2 * pixel_values - 1
+            file_id = file_name.rsplit(".mp4", 1)[0]
+
+        return pixel_values, caption, gravity, file_id
+
+    def __getitem__(self, data_id):
+        pixel_values, caption, gravity, file_id = self.get_batch(data_id % len(self.df))
+
+        control_video = self._generate_control_video(
+            gravity,
+            num_frames=self.num_frames,
+            num_channels=3,
+            height=self.height,
+            width=self.width,
+        )
+
+        # Prompt dropout: drop text prompt to force the model to rely on the control
+        # signal for generation, which directly strengthens ControlNet conditioning.
+        if self.ctrl_dropout_prob > 0.0 and random.random() < self.ctrl_dropout_prob:
+            caption = ""
 
         pixel_values = (pixel_values + 1) / 2  # -> [0, 1]
         if not self.is_validation_dataset:

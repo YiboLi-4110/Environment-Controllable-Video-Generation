@@ -7,8 +7,17 @@ for path in sys.path:
 
 import torch, os
 from src.physical_constant.wan_video_new import WanVideoPipeline, ModelConfig
-from src.physical_constant.utils import DiffusionTrainingModule, launch_training_task, wan_parser
-from src.physical_constant.unified_dataset import ControlSignalDataset_Falling, ControlSignalDataset_Sliding
+from src.physical_constant.utils import (
+    DiffusionTrainingModule,
+    launch_training_task,
+    launch_curriculum_training_task,
+    wan_parser,
+)
+from src.physical_constant.unified_dataset import (
+    ControlSignalDataset_Falling,
+    ControlSignalDataset_Sliding,
+    ControlSignalDataset_Real,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -129,10 +138,20 @@ class WanTrainingModule(DiffusionTrainingModule):
         return loss
 
 def get_dataset(args):
+    """
+    Build dataset(s) for the current training mode.
 
+    Standard mode  → returns a single ConcatDataset of falling + sliding synthetic data.
+    Curriculum mode → returns a tuple (syn_dataset, real_dataset) where syn_dataset is
+                      the ConcatDataset of falling + sliding and real_dataset is the
+                      ControlSignalDataset_Real instance.
+    """
     if args.control_signal_type == "gravity":
 
         control_signal_encoding = "visual_encode" if args.visual_encode else "num_encode"
+
+        syn_ctrl_dropout = getattr(args, "syn_ctrl_dropout_prob", 0.0)
+        real_ctrl_dropout = getattr(args, "real_ctrl_dropout_prob", 0.0)
 
         dataset_falling = ControlSignalDataset_Falling(
             base_path=args.dataset_base_path[0],
@@ -142,6 +161,7 @@ def get_dataset(args):
             height=args.height,
             width=args.width,
             control_signal_encoding=control_signal_encoding,
+            ctrl_dropout_prob=syn_ctrl_dropout,
         )
 
         dataset_sliding = ControlSignalDataset_Sliding(
@@ -152,19 +172,40 @@ def get_dataset(args):
             height=args.height,
             width=args.width,
             control_signal_encoding=control_signal_encoding,
+            ctrl_dropout_prob=syn_ctrl_dropout,
         )
 
         print(f"[get_dataset] control_signal_encoding = {control_signal_encoding}")
-        dataset = torch.utils.data.ConcatDataset([dataset_falling, dataset_sliding])
+        print(f"[get_dataset] syn_ctrl_dropout_prob   = {syn_ctrl_dropout}")
+        syn_dataset = torch.utils.data.ConcatDataset([dataset_falling, dataset_sliding])
+
+        if getattr(args, "curriculum_mode", False):
+            if args.dataset_base_path_real is None or args.dataset_metadata_path_real is None:
+                raise ValueError(
+                    "--dataset_base_path_real and --dataset_metadata_path_real must be "
+                    "provided when --curriculum_mode is enabled."
+                )
+            real_dataset = ControlSignalDataset_Real(
+                base_path=args.dataset_base_path_real,
+                metadata_path=args.dataset_metadata_path_real,
+                repeat=args.dataset_repeat,
+                num_frames=args.num_frames,
+                height=args.height,
+                width=args.width,
+                control_signal_encoding=control_signal_encoding,
+                ctrl_dropout_prob=real_ctrl_dropout,
+                enable_color_jitter=getattr(args, "real_color_jitter", False),
+            )
+            print(f"[get_dataset] real_ctrl_dropout_prob  = {real_ctrl_dropout}")
+            return syn_dataset, real_dataset
+
+        return syn_dataset
     else:
         raise NotImplementedError(f"Unknown control_signal_type: {args.control_signal_type}")
-
-    return dataset
 
 if __name__ == "__main__":
     parser = wan_parser()
     args = parser.parse_args()
-    dataset = get_dataset(args)
 
     model = WanTrainingModule(
         model_paths=args.model_paths,
@@ -183,7 +224,12 @@ if __name__ == "__main__":
         controlnet_num_layers=args.controlnet_num_layers,
         controlnet_stride=args.controlnet_stride,
         apply_strided_controlnet=args.apply_strided_controlnet,
-        offline_load=args.offline_load
+        offline_load=args.offline_load,
     )
 
-    launch_training_task(dataset, model, args=args)
+    if getattr(args, "curriculum_mode", False):
+        syn_dataset, real_dataset = get_dataset(args)
+        launch_curriculum_training_task(syn_dataset, real_dataset, model, args=args)
+    else:
+        dataset = get_dataset(args)
+        launch_training_task(dataset, model, args=args)
