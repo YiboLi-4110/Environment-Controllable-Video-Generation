@@ -14,3 +14,12 @@ python -c 'import torch; print(torch.cuda.is_available()); a = torch.zeros(3); a
 # install all the other requirements
 pip install -e .
 ```
+
+## Download
+```bash
+# download synthetic training data
+python scripts/download_files/download_datasets.py
+
+# download assets used for synthesizing training data
+python scripts/download_files/download_blender_textures.py
+```
