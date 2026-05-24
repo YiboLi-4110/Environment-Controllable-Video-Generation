@@ -8,7 +8,7 @@ os.environ["HF_HUB_BASE_URL"] = "https://hf-mirror.com"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # === Step 1: Download the public dataset snapshot ===
-REPO_ID = "brown-palm/force-prompting-dataset-creation"
+REPO_ID = "easybobLee/variable_gravity_dataset_creation"
 tmp_checkout = snapshot_download(
     repo_id=REPO_ID,
     repo_type="dataset",
